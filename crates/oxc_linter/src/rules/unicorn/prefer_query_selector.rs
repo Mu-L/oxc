@@ -1,22 +1,20 @@
-use miette::diagnostic;
-use oxc_ast::{
-    ast::{Argument, Expression},
-    AstKind,
-};
-use oxc_diagnostics::{
-    miette::{self, Diagnostic},
-    thiserror::{self, Error},
-};
+use oxc_ast::{AstKind, ast::Expression};
+use oxc_diagnostics::OxcDiagnostic;
 use oxc_macros::declare_oxc_lint;
 use oxc_span::{GetSpan, Span};
 use phf::phf_map;
 
-use crate::{context::LintContext, rule::Rule, utils::is_node_value_not_dom_node, AstNode, Fix};
+use crate::{AstNode, context::LintContext, rule::Rule, utils::is_node_value_not_dom_node};
 
-#[derive(Debug, Error, Diagnostic)]
-#[error("eslint-plugin-unicorn(prefer-query-selector): Prefer `.{0}()` over `.{1}()`.")]
-#[diagnostic(severity(Warning), help("It's better to use the same method to query DOM elements. This helps keep consistency and it lends itself to future improvements (e.g. more specific selectors)."))]
-struct PreferQuerySelectorDiagnostic(&'static str, &'static str, #[label] pub Span);
+fn prefer_query_selector_diagnostic(
+    good_method: &str,
+    bad_method: &str,
+    span: Span,
+) -> OxcDiagnostic {
+    OxcDiagnostic::warn(format!("Prefer `.{good_method}()` over `.{bad_method}()`."))
+        .with_help("It's better to use the same method to query DOM elements. This helps keep consistency and it lends itself to future improvements (e.g. more specific selectors).")
+        .with_label(span)
+}
 
 #[derive(Debug, Default, Clone)]
 pub struct PreferQuerySelector;
@@ -32,15 +30,23 @@ declare_oxc_lint!(
     ///
     /// Prefer `.querySelector()` over `.getElementById()`, `.querySelectorAll()` over `.getElementsByClassName()` and `.getElementsByTagName()`.
     ///
+    /// ### Why is this bad?
+    ///
+    /// - Using `.querySelector()` and `.querySelectorAll()` is more flexible and allows for more specific selectors.
+    /// - It's better to use the same method to query DOM elements. This helps keep consistency and it lends itself to future improvements (e.g. more specific selectors).
+    ///
     /// ### Example
+    ///
+    /// Examples of **incorrect** code for this rule:
     /// ```javascript
-    /// // Bad
     /// document.getElementById('foo');
     /// document.getElementsByClassName('foo bar');
     /// document.getElementsByTagName('main');
     /// document.getElementsByClassName(fn());
+    /// ```
     ///
-    /// // Good
+    /// Examples of **correct** code for this rule:
+    /// ```javascript
     /// document.querySelector('#foo');
     /// document.querySelector('.bar');
     /// document.querySelector('main #foo .bar');
@@ -49,18 +55,22 @@ declare_oxc_lint!(
     /// document.querySelector('li').querySelectorAll('a');
     /// ```
     PreferQuerySelector,
-    pedantic
+    unicorn,
+    pedantic,
+    conditional_fix
 );
 
 impl Rule for PreferQuerySelector {
     fn run<'a>(&self, node: &AstNode<'a>, ctx: &LintContext<'a>) {
-        let AstKind::CallExpression(call_expr) = node.kind() else { return };
+        let AstKind::CallExpression(call_expr) = node.kind() else {
+            return;
+        };
 
         if call_expr.optional || call_expr.arguments.len() != 1 {
             return;
         }
 
-        let Expression::MemberExpression(member_expr) = &call_expr.callee else {
+        let Some(member_expr) = call_expr.callee.as_member_expression() else {
             return;
         };
 
@@ -71,7 +81,7 @@ impl Rule for PreferQuerySelector {
             return;
         }
 
-        let Argument::Expression(argument_expr) = call_expr.arguments.get(0).unwrap() else {
+        let Some(argument_expr) = call_expr.arguments[0].as_expression() else {
             return;
         };
 
@@ -84,12 +94,15 @@ impl Rule for PreferQuerySelector {
                 continue;
             }
 
-            let diagnostic =
-                PreferQuerySelectorDiagnostic(preferred_selector, cur_property_name, property_span);
+            let diagnostic = prefer_query_selector_diagnostic(
+                preferred_selector,
+                cur_property_name,
+                property_span,
+            );
 
             if argument_expr.is_null() {
-                return ctx.diagnostic_with_fix(diagnostic, || {
-                    return Fix::new(*preferred_selector, property_span);
+                return ctx.diagnostic_with_fix(diagnostic, |fixer| {
+                    fixer.replace(property_span, *preferred_selector)
                 });
             }
 
@@ -97,7 +110,7 @@ impl Rule for PreferQuerySelector {
                 Expression::StringLiteral(literal) => Some(literal.value.trim()),
                 Expression::TemplateLiteral(literal) => {
                     if literal.expressions.len() == 0 {
-                        literal.quasis.get(0).unwrap().value.cooked.as_deref().map(str::trim)
+                        literal.quasis.first().unwrap().value.cooked.as_deref().map(str::trim)
                     } else {
                         None
                     }
@@ -106,20 +119,28 @@ impl Rule for PreferQuerySelector {
             };
 
             if let Some(literal_value) = literal_value {
-                return ctx.diagnostic_with_fix(diagnostic, || {
+                return ctx.diagnostic_with_fix(diagnostic, |fixer| {
                     if literal_value.is_empty() {
-                        return Fix::new(*preferred_selector, property_span);
+                        return fixer.replace(property_span, *preferred_selector);
                     }
 
-                    let source_text = argument_expr.span().source_text(ctx.source_text());
+                    let source_text = fixer.source_range(argument_expr.span());
                     let quotes_symbol = source_text.chars().next().unwrap();
-                    let sharp = if cur_property_name.eq(&"getElementById") { "#" } else { "" };
-                    return Fix::new(
-                        format!(
-                            "{preferred_selector}({quotes_symbol}{sharp}{literal_value}{quotes_symbol}"
-                        ),
-                        property_span.merge(&argument_expr.span()),
-                    );
+                    let argument = match *cur_property_name {
+                        "getElementById" => format!("#{literal_value}"),
+                        "getElementsByClassName" => {
+                            format!(
+                                ".{}",
+                                literal_value.split_whitespace().collect::<Vec<_>>().join(" .")
+                            )
+                        }
+                        _ => literal_value.to_string(),
+                    };
+                    let span = property_span.merge(argument_expr.span());
+                    fixer.replace(
+                        span,
+                        format!("{preferred_selector}({quotes_symbol}{argument}{quotes_symbol}"),
+                    )
                 });
             }
 
@@ -181,7 +202,7 @@ fn test() {
         ("document.getElementsByTagName('foo');", "document.querySelectorAll('foo');", None),
         (
             "document.getElementsByClassName(`foo bar`);",
-            "document.querySelectorAll(`foo bar`);",
+            "document.querySelectorAll(`.foo .bar`);",
             None,
         ),
         ("document.getElementsByClassName(null);", "document.querySelectorAll(null);", None),
@@ -195,7 +216,7 @@ fn test() {
         ("document.getElementsByClassName(fn());", "document.getElementsByClassName(fn());", None),
     ];
 
-    Tester::new_without_config(PreferQuerySelector::NAME, pass, fail)
+    Tester::new(PreferQuerySelector::NAME, PreferQuerySelector::PLUGIN, pass, fail)
         .expect_fix(fix)
         .test_and_snapshot();
 }

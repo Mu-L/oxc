@@ -34,16 +34,25 @@ impl<'a> Template<'a> {
             RuleKind::Jest => Path::new("crates/oxc_linter/src/rules/jest"),
             RuleKind::Typescript => Path::new("crates/oxc_linter/src/rules/typescript"),
             RuleKind::Unicorn => Path::new("crates/oxc_linter/src/rules/unicorn"),
+            RuleKind::Import => Path::new("crates/oxc_linter/src/rules/import"),
             RuleKind::React => Path::new("crates/oxc_linter/src/rules/react"),
+            RuleKind::ReactPerf => Path::new("crates/oxc_linter/src/rules/react_perf"),
             RuleKind::JSXA11y => Path::new("crates/oxc_linter/src/rules/jsx_a11y"),
+            RuleKind::Oxc => Path::new("crates/oxc_linter/src/rules/oxc"),
+            RuleKind::NextJS => Path::new("crates/oxc_linter/src/rules/nextjs"),
+            RuleKind::JSDoc => Path::new("crates/oxc_linter/src/rules/jsdoc"),
+            RuleKind::Node => Path::new("crates/oxc_linter/src/rules/node"),
+            RuleKind::Promise => Path::new("crates/oxc_linter/src/rules/promise"),
+            RuleKind::Vitest => Path::new("crates/oxc_linter/src/rules/vitest"),
         };
 
+        std::fs::create_dir_all(path)?;
         let out_path = path.join(format!("{}.rs", self.context.snake_rule_name));
 
         File::create(out_path.clone())?.write_all(rendered.as_bytes())?;
         format_rule_output(&out_path)?;
 
-        println!("Saved testd file to {out_path:?}");
+        println!("Saved test file to {out_path:?}");
 
         Ok(())
     }

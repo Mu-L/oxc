@@ -1,26 +1,36 @@
 [package]
-name                   = "oxc_span"
-version                = "0.2.0"
-publish                = true
-authors.workspace      = true
-description.workspace  = true
-edition.workspace      = true
-homepage.workspace     = true
-keywords.workspace     = true
-license.workspace      = true
-repository.workspace   = true
+name = "oxc_span"
+version = "0.52.0"
+authors.workspace = true
+categories.workspace = true
+edition.workspace = true
+homepage.workspace = true
+include = ["/src"]
+keywords.workspace = true
+license.workspace = true
+publish = true
+repository.workspace = true
 rust-version.workspace = true
-categories.workspace   = true
+description.workspace = true
+
+[lints]
+workspace = true
 
 [lib]
 doctest = false
 
+[dependencies]
+oxc_allocator = { workspace = true }
+oxc_ast_macros = { workspace = true }
+oxc_estree = { workspace = true }
+
+compact_str = { workspace = true }
+miette = { workspace = true }
+
+schemars = { workspace = true, optional = true }
+serde = { workspace = true, optional = true }
+
 [features]
 default = []
-serde   = ["dep:serde", "compact_str/serde"]
-
-[dependencies]
-miette      = { workspace = true }
-compact_str = { workspace = true }
-
-serde = { workspace = true, features = ["derive"], optional = true }
+serialize = ["compact_str/serde", "dep:serde", "oxc_estree/serialize"]
+schemars = ["dep:schemars"]

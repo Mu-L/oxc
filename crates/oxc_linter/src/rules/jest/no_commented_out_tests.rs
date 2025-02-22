@@ -1,17 +1,16 @@
-use oxc_diagnostics::{
-    miette::{self, Diagnostic},
-    thiserror::Error,
-};
+use lazy_static::lazy_static;
+use oxc_diagnostics::OxcDiagnostic;
 use oxc_macros::declare_oxc_lint;
 use oxc_span::Span;
 use regex::Regex;
 
 use crate::{context::LintContext, rule::Rule};
 
-#[derive(Debug, Error, Diagnostic)]
-#[error("eslint-plugin-jest(no-commented-out-tests): Some tests seem to be commented")]
-#[diagnostic(severity(warning), help("Remove or uncomment this comment"))]
-struct NoCommentedOutTestsDiagnostic(#[label] pub Span);
+fn no_commented_out_tests_diagnostic(span: Span) -> OxcDiagnostic {
+    OxcDiagnostic::warn("Some tests seem to be commented")
+        .with_help("Remove or uncomment this comment")
+        .with_label(span)
+}
 
 #[derive(Debug, Default, Clone)]
 pub struct NoCommentedOutTests;
@@ -38,30 +37,36 @@ declare_oxc_lint!(
     /// // it.skip('foo', () => {});
     /// // test.skip('foo', () => {});
     /// ```
+    ///
+    /// This rule is compatible with [eslint-plugin-vitest](https://github.com/veritem/eslint-plugin-vitest/blob/v1.1.9/docs/rules/no-commented-out-tests.md),
+    /// to use it, add the following configuration to your `.eslintrc.json`:
+    ///
+    /// ```json
+    /// {
+    ///   "rules": {
+    ///      "vitest/no-commented-out-tests": "error"
+    ///   }
+    /// }
+    /// ```
     NoCommentedOutTests,
-    restriction
+    jest,
+    suspicious
 );
 
 impl Rule for NoCommentedOutTests {
     fn run_once(&self, ctx: &LintContext) {
-        let comments = ctx.semantic().trivias().comments();
-        let source_text = ctx.semantic().source_text();
+        lazy_static! {
         //  /^\s*[xf]?(test|it|describe)(\.\w+|\[['"]\w+['"]\])?\s*\(/mu
-        let re =
+            static ref RE: Regex =
             Regex::new(r#"(?mu)^\s*[xf]?(test|it|describe)(\.\w+|\[['"]\w+['"]\])?\s*\("#).unwrap();
-        let commented_tests = comments.iter().filter_map(|(start, comment)| {
-            let start = *start;
-            let end = comment.end();
-            let text = &source_text[(start as usize)..(end as usize)];
-            if re.is_match(text) {
-                Some(Span::new(start, end))
-            } else {
-                None
-            }
+        }
+        let comments = ctx.semantic().comments();
+        let commented_tests = comments.iter().filter_map(|comment| {
+            let text = ctx.source_range(comment.content_span());
+            if RE.is_match(text) { Some(comment.content_span()) } else { None }
         });
-
         for span in commented_tests {
-            ctx.diagnostic(NoCommentedOutTestsDiagnostic(span));
+            ctx.diagnostic(no_commented_out_tests_diagnostic(span));
         }
     }
 }
@@ -70,7 +75,7 @@ impl Rule for NoCommentedOutTests {
 fn test() {
     use crate::tester::Tester;
 
-    let pass = vec![
+    let mut pass = vec![
         ("// foo('bar', function () {})", None),
         ("describe('foo', function () {})", None),
         ("it('foo', function () {})", None),
@@ -121,7 +126,7 @@ fn test() {
         ),
     ];
 
-    let fail = vec![
+    let mut fail = vec![
         ("// fdescribe('foo', function () {})", None),
         ("// describe['skip']('foo', function () {})", None),
         ("// describe['skip']('foo', function () {})", None),
@@ -160,16 +165,57 @@ fn test() {
         ("// test['someNewMethodThatMightBeAddedInTheFuture']()", None),
         ("// test('has title but no callback')", None),
         (
-            r#"
+            r"
               foo()
               /*
                 describe('has title but no callback', () => {})
               */
               bar()
-            "#,
+            ",
             None,
         ),
     ];
 
-    Tester::new(NoCommentedOutTests::NAME, pass, fail).test_and_snapshot();
+    let pass_vitest = vec![
+        r#"// foo("bar", function () {})"#,
+        r#"describe("foo", function () {})"#,
+        r#"it("foo", function () {})"#,
+        r#"describe.only("foo", function () {})"#,
+        r#"it.only("foo", function () {})"#,
+        r#"it.concurrent("foo", function () {})"#,
+        r#"test("foo", function () {})"#,
+        r#"test.only("foo", function () {})"#,
+        r#"test.concurrent("foo", function () {})"#,
+        r"var appliedSkip = describe.skip; appliedSkip.apply(describe)",
+        r"var calledSkip = it.skip; calledSkip.call(it)",
+        r"({ f: function () {} }).f()",
+        r"(a || b).f()",
+        r"itHappensToStartWithIt()",
+        r"testSomething()",
+        r"// latest(dates)",
+        r"// TODO: unify with Git implementation from Shipit (?)",
+        "#!/usr/bin/env node#",
+    ];
+
+    let fail_vitest = vec![
+        r"// describe(\'foo\', function () {})\'",
+        r#"// test.concurrent("foo", function () {})"#,
+        r#"// test["skip"]("foo", function () {})"#,
+        r#"// xdescribe("foo", function () {})"#,
+        r#"// xit("foo", function () {})"#,
+        r#"// fit("foo", function () {})"#,
+        r#"
+            // test(
+            //   "foo", function () {}
+            // )
+        "#,
+    ];
+
+    pass.extend(pass_vitest.into_iter().map(|x| (x, None)));
+    fail.extend(fail_vitest.into_iter().map(|x| (x, None)));
+
+    Tester::new(NoCommentedOutTests::NAME, NoCommentedOutTests::PLUGIN, pass, fail)
+        .with_jest_plugin(true)
+        .with_vitest_plugin(true)
+        .test_and_snapshot();
 }

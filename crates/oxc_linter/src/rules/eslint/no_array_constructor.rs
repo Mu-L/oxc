@@ -1,36 +1,50 @@
-use oxc_ast::AstKind;
-use oxc_diagnostics::{
-    miette::{self, Diagnostic},
-    thiserror::Error,
-};
+use oxc_ast::{AstKind, ast::Expression};
+use oxc_diagnostics::OxcDiagnostic;
 use oxc_macros::declare_oxc_lint;
+use oxc_semantic::IsGlobalReference;
 use oxc_span::Span;
 
-use crate::{context::LintContext, rule::Rule, AstNode};
+use crate::{AstNode, context::LintContext, rule::Rule};
 
-#[derive(Debug, Error, Diagnostic)]
-#[error("eslint(no-array-constructor): Disallow `Array` constructors")]
-#[diagnostic(severity(warning), help("Use array literal instead"))]
-struct NoArrayConstructorDiagnostic(#[label] pub Span);
+fn no_array_constructor_diagnostic(span: Span) -> OxcDiagnostic {
+    OxcDiagnostic::warn("Do not use `new` to create arrays")
+        .with_help("Use an array literal instead")
+        .with_label(span)
+}
 
 #[derive(Debug, Default, Clone)]
 pub struct NoArrayConstructor;
 
 declare_oxc_lint!(
     /// ### What it does
-    /// Disallow array constructor
+    /// Disallows creating arrays with the `Array` constructor.
     ///
     /// ### Why is this bad?
     ///
-    /// Use of the Array constructor to construct a new array is generally discouraged in favor of array literal notation because of the single-argument pitfall and because the Array global may be redefined.
-    /// The exception is when the Array constructor is used to intentionally create sparse arrays of a specified size by giving the constructor a single numeric argument.
+    /// Use of the `Array` constructor to construct a new array is generally
+    /// discouraged in favor of array literal notation because of the
+    /// single-argument pitfall and because the `Array` global may be redefined.
+    /// The exception is when the `Array` constructor is used to intentionally
+    /// create sparse arrays of a specified size by giving the constructor a
+    /// single numeric argument.
     ///
-    /// ### Example
+    /// ### Examples
+    ///
+    /// Examples of **incorrect** code for this rule:
     /// ```javascript
     /// let arr = new Array();
     /// ```
+    ///
+    /// Examples of **correct** code for this rule:
+    /// ```javascript
+    /// let arr = [];
+    /// let arr2 = Array.from(iterable);
+    /// let arr3 = new Array(9);
+    /// ```
     NoArrayConstructor,
-    pedantic
+    eslint,
+    pedantic,
+    pending
 );
 
 impl Rule for NoArrayConstructor {
@@ -50,15 +64,21 @@ impl Rule for NoArrayConstructor {
                 &new_expr.type_parameters,
                 false,
             ),
-            _ => return,
+            _ => {
+                return;
+            }
         };
 
-        if callee.is_specific_id("Array")
+        let Expression::Identifier(ident) = &callee else {
+            return;
+        };
+
+        if ident.is_global_reference_name("Array", ctx.symbols())
             && arguments.len() != 1
             && type_parameters.is_none()
             && !optional
         {
-            ctx.diagnostic(NoArrayConstructorDiagnostic(span));
+            ctx.diagnostic(no_array_constructor_diagnostic(span));
         }
     }
 }
@@ -92,6 +112,7 @@ fn test() {
         ("Array?.<Foo>();", None),
         ("Array?.(0, 1, 2);", None),
         ("Array?.(x, y);", None),
+        ("var Array; new Array;", None),
     ];
 
     let fail = vec![
@@ -104,5 +125,6 @@ fn test() {
         ("Array(0, 1, 2)", None),
     ];
 
-    Tester::new(NoArrayConstructor::NAME, pass, fail).test_and_snapshot();
+    Tester::new(NoArrayConstructor::NAME, NoArrayConstructor::PLUGIN, pass, fail)
+        .test_and_snapshot();
 }

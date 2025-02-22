@@ -1,4 +1,5 @@
-use phf::{phf_map, Map};
+//! XML Entities
+use phf::{Map, phf_map};
 
 /// XML Entities
 ///

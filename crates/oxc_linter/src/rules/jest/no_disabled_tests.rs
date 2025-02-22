@@ -1,16 +1,15 @@
-use oxc_ast::{ast::Expression, AstKind};
-use oxc_diagnostics::{
-    miette::{self, Diagnostic},
-    thiserror::Error,
-};
+use oxc_ast::{AstKind, ast::Expression};
+use oxc_diagnostics::OxcDiagnostic;
 use oxc_macros::declare_oxc_lint;
 use oxc_span::{GetSpan, Span};
 
 use crate::{
     context::LintContext,
     rule::Rule,
-    utils::{parse_general_jest_fn_call, JestFnKind, JestGeneralFnKind, ParsedGeneralJestFnCall},
-    AstNode,
+    utils::{
+        JestFnKind, JestGeneralFnKind, ParsedGeneralJestFnCall, PossibleJestNode,
+        parse_general_jest_fn_call,
+    },
 };
 
 #[derive(Debug, Default, Clone)]
@@ -49,14 +48,25 @@ declare_oxc_lint!(
     ///   pending();
     /// });
     /// ```
+    ///
+    /// This rule is compatible with [eslint-plugin-vitest](https://github.com/veritem/eslint-plugin-vitest/blob/v1.1.9/docs/rules/no-disabled-tests.md),
+    /// to use it, add the following configuration to your `.eslintrc.json`:
+    ///
+    /// ```json
+    /// {
+    ///   "rules": {
+    ///      "vitest/no-disabled-tests": "error"
+    ///   }
+    /// }
+    /// ```
     NoDisabledTests,
-    restriction
+    jest,
+    correctness
 );
 
-#[derive(Debug, Error, Diagnostic)]
-#[error("eslint-plugin-jest(no-disabled-tests): {0:?}")]
-#[diagnostic(severity(warning), help("{1:?}"))]
-struct NoDisabledTestsDiagnostic(&'static str, &'static str, #[label] pub Span);
+fn no_disabled_tests_diagnostic(x1: &'static str, x2: &'static str, span3: Span) -> OxcDiagnostic {
+    OxcDiagnostic::warn(x1).with_help(x2).with_label(span3)
+}
 
 enum Message {
     MissingFunction,
@@ -81,54 +91,61 @@ impl Message {
 }
 
 impl Rule for NoDisabledTests {
-    fn run<'a>(&self, node: &AstNode<'a>, ctx: &LintContext<'a>) {
-        if let AstKind::CallExpression(call_expr) = node.kind() {
-            if let Some(jest_fn_call) = parse_general_jest_fn_call(call_expr, node, ctx) {
-                let ParsedGeneralJestFnCall { kind, members, name } = jest_fn_call;
-                // `test('foo')`
-                let kind = match kind {
-                    JestFnKind::Expect | JestFnKind::Unknown => return,
-                    JestFnKind::General(kind) => kind,
+    fn run_on_jest_node<'a, 'c>(
+        &self,
+        jest_node: &PossibleJestNode<'a, 'c>,
+        ctx: &'c LintContext<'a>,
+    ) {
+        run(jest_node, ctx);
+    }
+}
+
+fn run<'a>(possible_jest_node: &PossibleJestNode<'a, '_>, ctx: &LintContext<'a>) {
+    let node = possible_jest_node.node;
+    if let AstKind::CallExpression(call_expr) = node.kind() {
+        if let Some(jest_fn_call) = parse_general_jest_fn_call(call_expr, possible_jest_node, ctx) {
+            let ParsedGeneralJestFnCall { kind, members, name, .. } = jest_fn_call;
+            // `test('foo')`
+            let kind = match kind {
+                JestFnKind::Expect | JestFnKind::ExpectTypeOf | JestFnKind::Unknown => return,
+                JestFnKind::General(kind) => kind,
+            };
+            if matches!(kind, JestGeneralFnKind::Test)
+                && call_expr.arguments.len() < 2
+                && members.iter().all(|member| member.is_name_unequal("todo"))
+            {
+                let (error, help) = Message::MissingFunction.details();
+                ctx.diagnostic(no_disabled_tests_diagnostic(error, help, call_expr.span));
+                return;
+            }
+
+            // the only jest functions that are with "x" are "xdescribe", "xtest", and "xit"
+            // `xdescribe('foo', () => {})`
+            if name.starts_with('x') {
+                let (error, help) = if matches!(kind, JestGeneralFnKind::Describe) {
+                    Message::DisabledSuiteWithX.details()
+                } else {
+                    Message::DisabledTestWithX.details()
                 };
-                if matches!(kind, JestGeneralFnKind::Test)
-                    && call_expr.arguments.len() < 2
-                    && members.iter().all(|member| member.is_name_unequal("todo"))
-                {
-                    let (error, help) = Message::MissingFunction.details();
-                    ctx.diagnostic(NoDisabledTestsDiagnostic(error, help, call_expr.span));
-                    return;
-                }
+                ctx.diagnostic(no_disabled_tests_diagnostic(error, help, call_expr.callee.span()));
+                return;
+            }
 
-                // the only jest functions that are with "x" are "xdescribe", "xtest", and "xit"
-                // `xdescribe('foo', () => {})`
-                if name.starts_with('x') {
-                    let (error, help) = if matches!(kind, JestGeneralFnKind::Describe) {
-                        Message::DisabledSuiteWithX.details()
-                    } else {
-                        Message::DisabledTestWithX.details()
-                    };
-                    ctx.diagnostic(NoDisabledTestsDiagnostic(error, help, call_expr.callee.span()));
-                    return;
-                }
-
-                // `it.skip('foo', function () {})'`
-                // `describe.skip('foo', function () {})'`
-                if members.iter().any(|member| member.is_name_equal("skip")) {
-                    let (error, help) = if matches!(kind, JestGeneralFnKind::Describe) {
-                        Message::DisabledSuiteWithSkip.details()
-                    } else {
-                        Message::DisabledTestWithSkip.details()
-                    };
-                    ctx.diagnostic(NoDisabledTestsDiagnostic(error, help, call_expr.callee.span()));
-                }
-            } else if let Expression::Identifier(ident) = &call_expr.callee {
-                if ident.name.as_str() == "pending"
-                    && ctx.semantic().is_reference_to_global_variable(ident)
-                {
-                    // `describe('foo', function () { pending() })`
-                    let (error, help) = Message::Pending.details();
-                    ctx.diagnostic(NoDisabledTestsDiagnostic(error, help, call_expr.span));
-                }
+            // `it.skip('foo', function () {})'`
+            // `describe.skip('foo', function () {})'`
+            if members.iter().any(|member| member.is_name_equal("skip")) {
+                let (error, help) = if matches!(kind, JestGeneralFnKind::Describe) {
+                    Message::DisabledSuiteWithSkip.details()
+                } else {
+                    Message::DisabledTestWithSkip.details()
+                };
+                ctx.diagnostic(no_disabled_tests_diagnostic(error, help, call_expr.callee.span()));
+            }
+        } else if let Expression::Identifier(ident) = &call_expr.callee {
+            if ident.name.as_str() == "pending" && ctx.is_reference_to_global_variable(ident) {
+                // `describe('foo', function () { pending() })`
+                let (error, help) = Message::Pending.details();
+                ctx.diagnostic(no_disabled_tests_diagnostic(error, help, call_expr.span));
             }
         }
     }
@@ -138,7 +155,7 @@ impl Rule for NoDisabledTests {
 fn test() {
     use crate::tester::Tester;
 
-    let pass = vec![
+    let mut pass = vec![
         ("describe('foo', function () {})", None),
         ("it('foo', function () {})", None),
         ("describe.only('foo', function () {})", None),
@@ -177,7 +194,7 @@ fn test() {
         ("import { test } from './test-utils'; test('something');", None),
     ];
 
-    let fail = vec![
+    let mut fail = vec![
         ("describe.skip('foo', function () {})", None),
         ("describe.skip.each([1, 2, 3])('%s', (a, b) => {});", None),
         ("xdescribe.each([1, 2, 3])('%s', (a, b) => {});", None),
@@ -206,5 +223,59 @@ fn test() {
         ("import { test } from '@jest/globals';test('something');", None),
     ];
 
-    Tester::new(NoDisabledTests::NAME, pass, fail).test_and_snapshot();
+    let pass_vitest = vec![
+        r#"describe("foo", function () {})"#,
+        r#"it("foo", function () {})"#,
+        r#"describe.only("foo", function () {})"#,
+        r#"it.only("foo", function () {})"#,
+        r#"it.each("foo", () => {})"#,
+        r#"it.concurrent("foo", function () {})"#,
+        r#"test("foo", function () {})"#,
+        r#"test.only("foo", function () {})"#,
+        r#"test.concurrent("foo", function () {})"#,
+        r#"describe[`${"skip"}`]("foo", function () {})"#,
+        r#"it.todo("fill this later")"#,
+        "var appliedSkip = describe.skip; appliedSkip.apply(describe)",
+        "var calledSkip = it.skip; calledSkip.call(it)",
+        "({ f: function () {} }).f()",
+        "(a || b).f()",
+        "itHappensToStartWithIt()",
+        "testSomething()",
+        "xitSomethingElse()",
+        "xitiViewMap()",
+        r#"
+            import { pending } from "actions"
+            test("foo", () => {
+              expect(pending()).toEqual({})
+            })
+        "#,
+        "
+            import { test } from './test-utils';
+	    test('something');
+        ",
+    ];
+
+    let fail_vitest = vec![
+        r#"describe.skip("foo", function () {})"#,
+        r#"xtest("foo", function () {})"#,
+        r#"xit.each``("foo", function () {})"#,
+        r#"xtest.each``("foo", function () {})"#,
+        r#"xit.each([])("foo", function () {})"#,
+        r#"it("has title but no callback")"#,
+        r#"test("has title but no callback")"#,
+        r#"it("contains a call to pending", function () { pending() })"#,
+        "pending();",
+        r#"
+            import { describe } from 'vitest';
+            describe.skip("foo", function () {})
+        "#,
+    ];
+
+    pass.extend(pass_vitest.into_iter().map(|x| (x, None)));
+    fail.extend(fail_vitest.into_iter().map(|x| (x, None)));
+
+    Tester::new(NoDisabledTests::NAME, NoDisabledTests::PLUGIN, pass, fail)
+        .with_jest_plugin(true)
+        .with_vitest_plugin(true)
+        .test_and_snapshot();
 }

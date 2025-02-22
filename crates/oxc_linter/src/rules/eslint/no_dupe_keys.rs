@@ -1,22 +1,22 @@
-use lazy_static::lazy_static;
 use oxc_ast::{
-    ast::{Expression, ObjectPropertyKind, PropertyKey, PropertyKind},
     AstKind,
+    ast::{ObjectPropertyKind, PropertyKey, PropertyKind},
 };
-use oxc_diagnostics::{
-    miette::{self, Diagnostic},
-    thiserror::Error,
-};
+use oxc_diagnostics::OxcDiagnostic;
 use oxc_macros::declare_oxc_lint;
 use oxc_span::{GetSpan, Span};
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxBuildHasher, FxHashMap};
 
-use crate::{ast_util::calculate_hash, context::LintContext, rule::Rule, AstNode};
+use crate::{AstNode, context::LintContext, rule::Rule};
 
-#[derive(Debug, Error, Diagnostic)]
-#[error("eslint(no-dupe-keys): Disallow duplicate keys in object literals")]
-#[diagnostic(severity(warning), help("Consider removing the duplicated key"))]
-struct NoDupeKeysDiagnostic(#[label] pub Span, #[label] pub Span);
+fn no_dupe_keys_diagnostic(first: Span, second: Span, key: &str) -> OxcDiagnostic {
+    OxcDiagnostic::warn(format!("Duplicate key '{key}'"))
+        .with_help("Consider removing the duplicated key")
+        .with_labels([
+            first.label("Key is first defined here"),
+            second.label("and duplicated here"),
+        ])
+}
 
 #[derive(Debug, Default, Clone)]
 pub struct NoDupeKeys;
@@ -28,65 +28,84 @@ declare_oxc_lint!(
     ///
     /// ### Why is this bad?
     ///
-    /// Multiple properties with the same key in object literals can cause unexpected behavior in your application.
+    /// Multiple properties with the same key in object literals can cause
+    /// unexpected behavior in your application.
+    ///
+    /// It is safe to disable this rule when using TypeScript because
+    /// TypeScript's compiler enforces this check.
     ///
     /// ### Example
-    /// ```javascript
+    ///
+    /// Examples of **incorrect** code for this rule:
+    /// ```js
     /// var foo = {
     ///     bar: "baz",
     ///     bar: "qux"
-    /// }
+    /// };
+    ///
+    /// var foo = {
+    ///     "bar": "baz",
+    ///     bar: "qux"
+    /// };
+    ///
+    /// var foo = {
+    ///     0x1: "baz",
+    ///     1: "qux"
+    /// };
+    /// ```
+    ///
+    /// Examples of **correct** code for this rule:
+    /// ```js
+    /// var foo = {
+    ///     bar: "baz",
+    ///     qux: "qux"
+    /// };
     /// ```
     NoDupeKeys,
+    eslint,
     correctness
 );
 
 impl Rule for NoDupeKeys {
     fn run<'a>(&self, node: &AstNode<'a>, ctx: &LintContext<'a>) {
-        let AstKind::ObjectExpression(obj_expr) = node.kind() else { return };
-        let mut map = FxHashMap::default();
+        let AstKind::ObjectExpression(obj_expr) = node.kind() else {
+            return;
+        };
+        let len = obj_expr.properties.len();
+        if len <= 1 {
+            return;
+        }
+        let mut map = FxHashMap::with_capacity_and_hasher(len, FxBuildHasher);
         for prop in &obj_expr.properties {
-            let ObjectPropertyKind::ObjectProperty(prop) = prop else { continue };
-            let Some(hash) = calculate_property_kind_hash(&prop.key) else { continue };
-            if let Some((prev_kind, prev_span)) = map.insert(hash, (prop.kind, prop.key.span())) {
+            let ObjectPropertyKind::ObjectProperty(prop) = prop else {
+                continue;
+            };
+            let Some(name) = prop.key.static_name() else {
+                return;
+            };
+            if let Some((prev_kind, prev_span)) = map.insert(name, (prop.kind, prop.key.span())) {
                 if prev_kind == PropertyKind::Init
                     || prop.kind == PropertyKind::Init
                     || prev_kind == prop.kind
                 {
-                    ctx.diagnostic(NoDupeKeysDiagnostic(prev_span, prop.key.span()));
+                    let name = prop_key_name(&prop.key, ctx);
+                    ctx.diagnostic(no_dupe_keys_diagnostic(prev_span, prop.key.span(), name));
                 }
             }
         }
     }
 }
 
-// todo: should this be located within oxc_ast?
-fn calculate_property_kind_hash(key: &PropertyKey) -> Option<u64> {
-    lazy_static! {
-        static ref NULL_HASH: u64 = calculate_hash(&"null");
-    }
-
+fn prop_key_name<'a>(key: &PropertyKey<'a>, ctx: &LintContext<'a>) -> &'a str {
     match key {
-        PropertyKey::Identifier(ident) => Some(calculate_hash(&ident)),
-        PropertyKey::PrivateIdentifier(_) => None,
-        PropertyKey::Expression(expr) => match expr {
-            Expression::StringLiteral(lit) => Some(calculate_hash(&lit.value)),
-            // note: hashes won't work as expected if these aren't strings. Save
-            // NumberLiteral I don't think this should be too much of a problem
-            // b/c most people don't use `null`, regexes, etc. as object
-            // property keys when writing real code.
-            Expression::RegExpLiteral(lit) => Some(calculate_hash(&lit.regex.to_string())),
-            Expression::NumberLiteral(lit) => Some(calculate_hash(&lit.value.to_string())),
-            Expression::BigintLiteral(lit) => Some(calculate_hash(&lit.value.to_string())),
-            Expression::NullLiteral(_) => Some(*NULL_HASH),
-            Expression::TemplateLiteral(lit) => {
-                lit.expressions.is_empty().then(|| lit.quasi()).flatten().map(calculate_hash)
-            }
-            _ => None,
-        },
+        PropertyKey::Identifier(ident) => ident.name.as_str(),
+        PropertyKey::StaticIdentifier(ident) => ident.name.as_str(),
+        PropertyKey::PrivateIdentifier(ident) => ident.name.as_str(),
+        PropertyKey::StringLiteral(lit) => lit.value.as_str(),
+        PropertyKey::NumericLiteral(lit) => lit.raw.as_ref().unwrap().as_str(),
+        _ => ctx.source_range(key.span()),
     }
 }
-
 #[test]
 fn test() {
     use crate::tester::Tester;
@@ -109,6 +128,8 @@ fn test() {
         // Syntax:error: the '0' prefixed octal literals is not allowed.
         // ("var x = { 012: 1, 12: 2 };", None),
         ("var x = { 1_0: 1, 1: 2 };", None),
+        // NOTE: This should fail when we get read the big int value
+        ("var x = { 1n: 1, 1: 2 };", None),
     ];
 
     let fail = vec![
@@ -120,7 +141,6 @@ fn test() {
         ("var x = { 012: 1, 10: 2 };", None),
         ("var x = { 0b1: 1, 1: 2 };", None),
         ("var x = { 0o1: 1, 1: 2 };", None),
-        ("var x = { 1n: 1, 1: 2 };", None),
         ("var x = { 1_0: 1, 10: 2 };", None),
         ("var x = { \"z\": 1, z: 2 };", None),
         ("var foo = {\n  bar: 1,\n  bar: 1,\n}", None),
@@ -130,5 +150,5 @@ fn test() {
         ("var x = ({ '/(?<zero>0)/': 1, [/(?<zero>0)/]: 2 })", None),
     ];
 
-    Tester::new(NoDupeKeys::NAME, pass, fail).test_and_snapshot();
+    Tester::new(NoDupeKeys::NAME, NoDupeKeys::PLUGIN, pass, fail).test_and_snapshot();
 }

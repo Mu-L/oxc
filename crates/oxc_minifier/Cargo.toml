@@ -1,42 +1,43 @@
 [package]
-name                   = "oxc_minifier"
-version                = "0.2.0"
-publish                = true
-authors.workspace      = true
-description.workspace  = true
-edition.workspace      = true
-homepage.workspace     = true
-keywords.workspace     = true
-license.workspace      = true
-repository.workspace   = true
+name = "oxc_minifier"
+version = "0.52.0"
+authors.workspace = true
+categories.workspace = true
+edition.workspace = true
+homepage.workspace = true
+include = ["/examples", "/src"]
+keywords.workspace = true
+license.workspace = true
+publish = true
+repository.workspace = true
 rust-version.workspace = true
-categories.workspace   = true
+description.workspace = true
+
+[lints]
+workspace = true
 
 [lib]
+test = true
 doctest = false
 
 [dependencies]
 oxc_allocator = { workspace = true }
-oxc_span      = { workspace = true }
-oxc_ast       = { workspace = true }
-oxc_semantic  = { workspace = true }
-oxc_syntax    = { workspace = true }
-oxc_index     = { workspace = true }
+oxc_ast = { workspace = true }
+oxc_codegen = { workspace = true }
+oxc_data_structures = { workspace = true }
+oxc_ecmascript = { workspace = true }
+oxc_mangler = { workspace = true }
+oxc_parser = { workspace = true }
+oxc_semantic = { workspace = true }
+oxc_span = { workspace = true }
+oxc_syntax = { workspace = true }
+oxc_traverse = { workspace = true }
 
-num-bigint = { workspace = true }
-itertools  = { workspace = true }
-num-traits = { workspace = true }
+cow-utils = { workspace = true }
+rustc-hash = { workspace = true }
 
 [dev-dependencies]
-oxc_parser  = { workspace = true }
-oxc_codegen = { workspace = true }
+oxc_parser = { workspace = true }
 
-insta     = { workspace = true }
-walkdir   = { workspace = true }
+insta = { workspace = true }
 pico-args = { workspace = true }
-
-[target.'cfg(not(target_env = "msvc"))'.dev-dependencies]
-jemallocator = { workspace = true }
-
-[target.'cfg(target_os = "windows")'.dev-dependencies]
-mimalloc = { workspace = true }

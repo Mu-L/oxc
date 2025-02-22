@@ -1,209 +1,203 @@
-use std::rc::Rc;
+//! ES2021: Logical Assignment Operators
+//!
+//! This plugin transforms logical assignment operators (`&&=`, `||=`, `??=`)
+//! to a series of logical expressions.
+//!
+//! > This plugin is included in `preset-env`, in ES2021
+//!
+//! ## Example
+//!
+//! Input:
+//! ```js
+//! a ||= b;
+//! obj.a.b ||= c;
+//!
+//! a &&= b;
+//! obj.a.b &&= c;
+//! ```
+//!
+//! Output:
+//! ```js
+//! var _obj$a, _obj$a2;
+//!
+//! a || (a = b);
+//! (_obj$a = obj.a).b || (_obj$a.b = c);
+//!
+//! a && (a = b);
+//! (_obj$a2 = obj.a).b && (_obj$a2.b = c);
+//! ```
+//!
+//! ### With Nullish Coalescing
+//!
+//! > While using the [nullish-coalescing-operator](https://github.com/oxc-project/oxc/blob/main/crates/oxc_transformer/src/es2020/nullish_coalescing_operator.rs) plugin (included in `preset-env``)
+//!
+//! Input:
+//! ```js
+//! a ??= b;
+//! obj.a.b ??= c;
+//! ```
+//!
+//! Output:
+//! ```js
+//! var _a, _obj$a, _obj$a$b;
+//!
+//! (_a = a) !== null && _a !== void 0 ? _a : (a = b);
+//! (_obj$a$b = (_obj$a = obj.a).b) !== null && _obj$a$b !== void 0
+//! ? _obj$a$b
+//! : (_obj$a.b = c);
+//! ```
+//! ## Implementation
+//!
+//! Implementation based on [@babel/plugin-transform-logical-assignment-operators](https://babel.dev/docs/babel-plugin-transform-logical-assignment-operators).
+//!
+//! ## References:
+//! * Babel plugin implementation: <https://github.com/babel/babel/tree/v7.26.2/packages/babel-plugin-transform-logical-assignment-operators>
+//! * Logical Assignment TC39 proposal: <https://github.com/tc39/proposal-logical-assignment>
 
-use oxc_allocator::Vec;
-use oxc_ast::{ast::*, AstBuilder};
+use oxc_ast::ast::*;
+use oxc_semantic::ReferenceFlags;
 use oxc_span::SPAN;
-use oxc_syntax::operator::{AssignmentOperator, LogicalOperator};
+use oxc_traverse::{Traverse, TraverseCtx};
 
-use crate::{
-    context::TransformerCtx,
-    options::{TransformOptions, TransformTarget},
-    utils::CreateVars,
-};
+use crate::TransformCtx;
 
-/// ES2021: Logical Assignment Operators
-///
-/// References:
-/// * <https://babel.dev/docs/babel-plugin-transform-logical-assignment-operators>
-/// * <https://github.com/babel/babel/blob/main/packages/babel-plugin-transform-logical-assignment-operators>
-pub struct LogicalAssignmentOperators<'a> {
-    ast: Rc<AstBuilder<'a>>,
-    ctx: TransformerCtx<'a>,
-
-    vars: Vec<'a, VariableDeclarator<'a>>,
+pub struct LogicalAssignmentOperators<'a, 'ctx> {
+    ctx: &'ctx TransformCtx<'a>,
 }
 
-impl<'a> CreateVars<'a> for LogicalAssignmentOperators<'a> {
-    fn ctx(&self) -> &TransformerCtx<'a> {
-        &self.ctx
-    }
-
-    fn vars_mut(&mut self) -> &mut Vec<'a, VariableDeclarator<'a>> {
-        &mut self.vars
+impl<'a, 'ctx> LogicalAssignmentOperators<'a, 'ctx> {
+    pub fn new(ctx: &'ctx TransformCtx<'a>) -> Self {
+        Self { ctx }
     }
 }
 
-impl<'a> LogicalAssignmentOperators<'a> {
-    pub fn new(
-        ast: Rc<AstBuilder<'a>>,
-        ctx: TransformerCtx<'a>,
-        options: &TransformOptions,
-    ) -> Option<Self> {
-        (options.target < TransformTarget::ES2021 || options.logical_assignment_operators).then(
-            || {
-                let vars = ast.new_vec();
-                Self { ast, ctx, vars }
-            },
-        )
-    }
-
-    pub fn transform_expression<'b>(&mut self, expr: &'b mut Expression<'a>) {
+impl<'a> Traverse<'a> for LogicalAssignmentOperators<'a, '_> {
+    // `#[inline]` because this is a hot path, and most `Expression`s are not `AssignmentExpression`s
+    // with a logical operator. So we want to bail out as fast as possible for everything else,
+    // without the cost of a function call.
+    #[inline]
+    fn enter_expression(&mut self, expr: &mut Expression<'a>, ctx: &mut TraverseCtx<'a>) {
         let Expression::AssignmentExpression(assignment_expr) = expr else { return };
 
         // `&&=` `||=` `??=`
-        let operator = match assignment_expr.operator {
-            AssignmentOperator::LogicalAnd => LogicalOperator::And,
-            AssignmentOperator::LogicalOr => LogicalOperator::Or,
-            AssignmentOperator::LogicalNullish => LogicalOperator::Coalesce,
-            _ => return,
-        };
+        let Some(operator) = assignment_expr.operator.to_logical_operator() else { return };
+
+        self.transform_logical_assignment(expr, operator, ctx);
+    }
+}
+
+impl<'a> LogicalAssignmentOperators<'a, '_> {
+    fn transform_logical_assignment(
+        &self,
+        expr: &mut Expression<'a>,
+        operator: LogicalOperator,
+        ctx: &mut TraverseCtx<'a>,
+    ) {
+        let Expression::AssignmentExpression(assignment_expr) = expr else { unreachable!() };
 
         // `a &&= c` -> `a && (a = c);`
         //               ^     ^ assign_target
         //               ^ left_expr
 
-        let left_expr: Expression<'a>;
-        let assign_target: SimpleAssignmentTarget<'a>;
+        // TODO: Add tests, cover private identifier
+        let (left_expr, assign_target) = match &mut assignment_expr.left {
+            // `a &&= c` -> `a && (a = c)`
+            AssignmentTarget::AssignmentTargetIdentifier(ident) => {
+                Self::convert_identifier(ident, ctx)
+            }
+            // `a.b &&= c` -> `var _a; (_a = a).b && (_a.b = c)`
+            AssignmentTarget::StaticMemberExpression(static_expr) => {
+                self.convert_static_member_expression(static_expr, ctx)
+            }
+            // `a[b.y] &&= c;` ->
+            // `var _a, _b$y; (_a = a)[_b$y = b.y] && (_a[_b$y] = c);`
+            AssignmentTarget::ComputedMemberExpression(computed_expr) => {
+                self.convert_computed_member_expression(computed_expr, ctx)
+            }
+            // TODO
+            #[expect(clippy::match_same_arms)]
+            AssignmentTarget::PrivateFieldExpression(_) => return,
+            // All other are TypeScript syntax.
 
-        // TODO: refactor this block, add tests, cover private identifier
-        match &assignment_expr.left {
-            AssignmentTarget::SimpleAssignmentTarget(target) => match target {
-                SimpleAssignmentTarget::AssignmentTargetIdentifier(ident) => {
-                    left_expr = self.ast.identifier_reference_expression((*ident).clone());
-                    assign_target = self.ast.simple_assignment_target_identifier((*ident).clone());
-                }
-                SimpleAssignmentTarget::MemberAssignmentTarget(member_expr) => {
-                    let op = AssignmentOperator::Assign;
-
-                    // `a.b &&= c` -> `var _a; (_a = a).b && (_a.b = c)`
-                    match &**member_expr {
-                        MemberExpression::StaticMemberExpression(static_expr) => {
-                            if let Some(ident) = self.maybe_generate_memoised(&static_expr.object) {
-                                let right = self.ast.copy(&static_expr.object);
-                                let mut expr = self.ast.copy(static_expr);
-                                let target = AssignmentTarget::SimpleAssignmentTarget(
-                                    self.ast.simple_assignment_target_identifier(ident.clone()),
-                                );
-                                expr.object =
-                                    self.ast.assignment_expression(SPAN, op, target, right);
-                                left_expr = self.ast.member_expression(
-                                    MemberExpression::StaticMemberExpression(expr),
-                                );
-
-                                let mut expr = self.ast.copy(static_expr);
-                                expr.object = self.ast.identifier_reference_expression(ident);
-                                assign_target =
-                                    self.ast.simple_assignment_target_member_expression(
-                                        MemberExpression::StaticMemberExpression(expr),
-                                    );
-                            } else {
-                                left_expr = self.ast.member_expression(
-                                    MemberExpression::StaticMemberExpression(
-                                        self.ast.copy(static_expr),
-                                    ),
-                                );
-                                assign_target = SimpleAssignmentTarget::MemberAssignmentTarget(
-                                    self.ast.copy(member_expr),
-                                );
-                            };
-                        }
-                        // `a[b.y] &&= c;` ->
-                        // `var _a, _b$y; (_a = a)[_b$y = b.y] && (_a[_b$y] = c);`
-                        MemberExpression::ComputedMemberExpression(computed_expr) => {
-                            if let Some(ident) = self.maybe_generate_memoised(&computed_expr.object)
-                            {
-                                let property_ident =
-                                    self.maybe_generate_memoised(&computed_expr.expression);
-
-                                let right = self.ast.copy(&computed_expr.object);
-                                let mut expr = self.ast.copy(computed_expr);
-                                let target = AssignmentTarget::SimpleAssignmentTarget(
-                                    self.ast.simple_assignment_target_identifier(ident.clone()),
-                                );
-                                expr.object =
-                                    self.ast.assignment_expression(SPAN, op, target, right);
-                                if let Some(property_ident) = &property_ident {
-                                    let left = AssignmentTarget::SimpleAssignmentTarget(
-                                        self.ast.simple_assignment_target_identifier(
-                                            property_ident.clone(),
-                                        ),
-                                    );
-                                    let right = self.ast.copy(&computed_expr.expression);
-                                    expr.expression =
-                                        self.ast.assignment_expression(SPAN, op, left, right);
-                                }
-                                left_expr = self.ast.member_expression(
-                                    MemberExpression::ComputedMemberExpression(expr),
-                                );
-
-                                // `(_a[_b$y] = c)` part
-                                let mut expr = self.ast.copy(computed_expr);
-                                expr.object = self.ast.identifier_reference_expression(ident);
-                                if let Some(property_ident) = property_ident {
-                                    expr.expression =
-                                        self.ast.identifier_reference_expression(property_ident);
-                                }
-                                assign_target =
-                                    self.ast.simple_assignment_target_member_expression(
-                                        MemberExpression::ComputedMemberExpression(expr),
-                                    );
-                            } else {
-                                let property_ident =
-                                    self.maybe_generate_memoised(&computed_expr.expression);
-
-                                // let right = self.ast.copy(&computed_expr.object);
-                                let mut expr = self.ast.copy(computed_expr);
-                                // let target = AssignmentTarget::SimpleAssignmentTarget(
-                                // self.ast.simple_assignment_target_identifier(ident.clone()),
-                                // );
-                                // expr.object =
-                                // self.ast.assignment_expression(span, op, target, right);
-                                if let Some(property_ident) = &property_ident {
-                                    let left = AssignmentTarget::SimpleAssignmentTarget(
-                                        self.ast.simple_assignment_target_identifier(
-                                            property_ident.clone(),
-                                        ),
-                                    );
-                                    let right = self.ast.copy(&computed_expr.expression);
-                                    expr.expression =
-                                        self.ast.assignment_expression(SPAN, op, left, right);
-                                }
-                                left_expr = self.ast.member_expression(
-                                    MemberExpression::ComputedMemberExpression(expr),
-                                );
-
-                                let mut expr = self.ast.copy(computed_expr);
-                                // expr.object = self.ast.identifier_reference_expression(ident);
-                                if let Some(property_ident) = property_ident {
-                                    expr.expression =
-                                        self.ast.identifier_reference_expression(property_ident);
-                                }
-                                assign_target =
-                                    self.ast.simple_assignment_target_member_expression(
-                                        MemberExpression::ComputedMemberExpression(expr),
-                                    );
-                            };
-                        }
-                        MemberExpression::PrivateFieldExpression(_) => return,
-                    }
-                }
-                // All other are TypeScript syntax.
-                _ => return,
-            },
             // It is a Syntax Error if AssignmentTargetType of LeftHandSideExpression is not simple.
             // So safe to return here.
-            AssignmentTarget::AssignmentTargetPattern(_) => return,
+            _ => return,
         };
 
         let assign_op = AssignmentOperator::Assign;
-        let assign_target = AssignmentTarget::SimpleAssignmentTarget(assign_target);
-        let right = self.ast.move_expression(&mut assignment_expr.right);
-        let right = self.ast.assignment_expression(SPAN, assign_op, assign_target, right);
+        let right = ctx.ast.move_expression(&mut assignment_expr.right);
+        let right = ctx.ast.expression_assignment(SPAN, assign_op, assign_target, right);
 
-        let logical_expr = self.ast.logical_expression(SPAN, left_expr, operator, right);
+        let logical_expr = ctx.ast.expression_logical(SPAN, left_expr, operator, right);
 
         *expr = logical_expr;
     }
-}
 
-// TODO: test all permutations
+    fn convert_identifier(
+        ident: &IdentifierReference<'a>,
+        ctx: &mut TraverseCtx<'a>,
+    ) -> (Expression<'a>, AssignmentTarget<'a>) {
+        let reference = ctx.symbols_mut().get_reference_mut(ident.reference_id());
+        *reference.flags_mut() = ReferenceFlags::Read;
+        let symbol_id = reference.symbol_id();
+        let left_expr = Expression::Identifier(ctx.alloc(ident.clone()));
+
+        let ident = ctx.create_ident_reference(SPAN, ident.name, symbol_id, ReferenceFlags::Write);
+        let assign_target = AssignmentTarget::AssignmentTargetIdentifier(ctx.alloc(ident));
+        (left_expr, assign_target)
+    }
+
+    fn convert_static_member_expression(
+        &self,
+        static_expr: &mut StaticMemberExpression<'a>,
+        ctx: &mut TraverseCtx<'a>,
+    ) -> (Expression<'a>, AssignmentTarget<'a>) {
+        let object = ctx.ast.move_expression(&mut static_expr.object);
+        let (object, object_ref) = self.ctx.duplicate_expression(object, true, ctx);
+
+        let left_expr = Expression::from(ctx.ast.member_expression_static(
+            static_expr.span,
+            object,
+            static_expr.property.clone(),
+            false,
+        ));
+
+        let assign_expr = ctx.ast.member_expression_static(
+            static_expr.span,
+            object_ref,
+            static_expr.property.clone(),
+            false,
+        );
+        let assign_target = AssignmentTarget::from(assign_expr);
+
+        (left_expr, assign_target)
+    }
+
+    fn convert_computed_member_expression(
+        &self,
+        computed_expr: &mut ComputedMemberExpression<'a>,
+        ctx: &mut TraverseCtx<'a>,
+    ) -> (Expression<'a>, AssignmentTarget<'a>) {
+        let object = ctx.ast.move_expression(&mut computed_expr.object);
+        let (object, object_ref) = self.ctx.duplicate_expression(object, true, ctx);
+
+        let expression = ctx.ast.move_expression(&mut computed_expr.expression);
+        let (expression, expression_ref) = self.ctx.duplicate_expression(expression, true, ctx);
+
+        let left_expr = Expression::from(ctx.ast.member_expression_computed(
+            computed_expr.span,
+            object,
+            expression,
+            false,
+        ));
+
+        let assign_target = AssignmentTarget::from(ctx.ast.member_expression_computed(
+            computed_expr.span,
+            object_ref,
+            expression_ref,
+            false,
+        ));
+
+        (left_expr, assign_target)
+    }
+}

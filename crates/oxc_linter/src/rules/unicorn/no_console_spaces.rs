@@ -1,22 +1,26 @@
-use oxc_ast::{
-    ast::{Argument, Expression},
-    AstKind,
-};
-use oxc_diagnostics::{
-    miette::{self, Diagnostic},
-    thiserror::{self, Error},
-};
+use std::borrow::Cow;
+
+use oxc_ast::{AstKind, ast::Expression};
+use oxc_diagnostics::OxcDiagnostic;
 use oxc_macros::declare_oxc_lint;
 use oxc_span::{GetSpan, Span};
 
-use crate::{context::LintContext, rule::Rule, AstNode, Fix};
+use crate::{
+    AstNode,
+    ast_util::{call_expr_method_callee_info, is_method_call},
+    context::LintContext,
+    rule::Rule,
+};
 
-#[derive(Debug, Error, Diagnostic)]
-#[error(
-    "eslint-plugin-unicorn(no-console-spaces): Do not use {0} spaces with `console.{1}` parameters"
-)]
-#[diagnostic(severity(warning), help("The `console.log()` method and similar methods join the parameters with a space so adding a leading/trailing space to a parameter, results in two spaces being added."))]
-struct NoConsoleSpacesDiagnostic(&'static str, String, #[label] pub Span);
+fn no_console_spaces_diagnostic(
+    leading_or_trailing: &str,
+    method_name: &str,
+    span: Span,
+) -> OxcDiagnostic {
+    OxcDiagnostic::warn(format!("Do not use {leading_or_trailing} spaces with `console.{method_name}` parameters"))
+        .with_help("The `console.log()` method and similar methods join the parameters with a space so adding a leading/trailing space to a parameter, results in two spaces being added.")
+        .with_label(span)
+}
 
 #[derive(Debug, Default, Clone)]
 pub struct NoConsoleSpaces;
@@ -31,83 +35,83 @@ declare_oxc_lint!(
     /// The `console.log()` method and similar methods join the parameters with a space so adding a leading/trailing space to a parameter, results in two spaces being added.
     ///
     /// ### Example
+    ///
+    /// Examples of **incorrect** code for this rule:
     /// ```javascript
-    ///
-    /// // Bad
     /// console.log("abc ", "def");
+    /// ```
     ///
-    /// // Good
+    /// Examples of **correct** code for this rule:
+    /// ```javascript
     /// console.log("abc", "def");
-    ///
     /// ```
     NoConsoleSpaces,
-    style
+    unicorn,
+    style,
+    fix
 );
 
 impl Rule for NoConsoleSpaces {
     fn run<'a>(&self, node: &AstNode<'a>, ctx: &LintContext<'a>) {
-        let call_expr = match node.kind() {
-            AstKind::CallExpression(call_expr) => call_expr,
-            _ => return,
+        let AstKind::CallExpression(call_expr) = node.kind() else {
+            return;
         };
 
-        let member_expr = match &call_expr.callee {
-            Expression::MemberExpression(member_expr) => member_expr,
-            _ => return,
-        };
+        if !is_method_call(
+            call_expr,
+            Some(&["console"]),
+            Some(&["log", "debug", "info", "warn", "error"]),
+            None,
+            None,
+        ) {
+            return;
+        }
 
-        match member_expr.object() {
-            Expression::Identifier(ident) if ident.name == "console" => ident,
-            _ => return,
-        };
+        let call_expr_arg_len = call_expr.arguments.len();
 
-        if let Some(ident) = member_expr.static_property_name() {
-            if matches!(ident, "log" | "debug" | "info" | "warn" | "error") {
-                let call_expr_arg_len = call_expr.arguments.len();
+        for (i, arg) in call_expr.arguments.iter().enumerate() {
+            if let Some(expression_arg) = arg.as_expression() {
+                let (literal_raw, is_template_lit) = match expression_arg {
+                    Expression::StringLiteral(string_lit) => {
+                        let literal_raw = string_lit.value.as_str();
 
-                for (i, arg) in call_expr.arguments.iter().enumerate() {
-                    if let Argument::Expression(expression_arg) = &arg {
-                        let (literal_raw, is_template_lit) = match expression_arg {
-                            Expression::StringLiteral(string_lit) => {
-                                let literal_raw = string_lit.value.as_str();
-
-                                (literal_raw, false)
-                            }
-                            Expression::TemplateLiteral(string_lit) => {
-                                let literal_raw = string_lit
-                                    .span
-                                    .source_text(ctx.source_text().as_ref())
-                                    .trim_start_matches('`')
-                                    .trim_end_matches('`');
-
-                                (literal_raw, true)
-                            }
-
-                            _ => continue,
-                        };
-
-                        if check_literal_leading(i, literal_raw) {
-                            report_diagnostic(
-                                "leading",
-                                ident,
-                                expression_arg.span(),
-                                literal_raw,
-                                is_template_lit,
-                                ctx,
-                            );
-                        }
-
-                        if check_literal_trailing(i, literal_raw, call_expr_arg_len) {
-                            report_diagnostic(
-                                "trailing",
-                                ident,
-                                expression_arg.span(),
-                                literal_raw,
-                                is_template_lit,
-                                ctx,
-                            );
-                        }
+                        (literal_raw, false)
                     }
+                    Expression::TemplateLiteral(string_lit) => {
+                        let literal_raw = string_lit
+                            .span
+                            .source_text(ctx.source_text().as_ref())
+                            .trim_start_matches('`')
+                            .trim_end_matches('`');
+
+                        (literal_raw, true)
+                    }
+
+                    _ => continue,
+                };
+
+                if check_literal_leading(i, literal_raw) {
+                    report_diagnostic(
+                        "leading",
+                        // SAFETY: `is_method_call` ensures that `call_expr`'s `callee` is a `MemberExpression` with a `MemberExpression` as its `object`.
+                        call_expr_method_callee_info(call_expr).unwrap().1,
+                        expression_arg.span(),
+                        literal_raw,
+                        is_template_lit,
+                        ctx,
+                    );
+                }
+
+                if check_literal_trailing(i, literal_raw, call_expr_arg_len) {
+                    report_diagnostic(
+                        "trailing",
+                        // SAFETY: `is_method_call` ensures that `call_expr`'s `callee` is a `MemberExpression` with a `MemberExpression` as its `object`.
+                        call_expr_method_callee_info(call_expr).unwrap().1,
+                        expression_arg.span(),
+                        literal_raw,
+                        is_template_lit,
+                        ctx,
+                    );
                 }
             }
         }
@@ -120,25 +124,23 @@ fn check_literal_leading(i: usize, literal: &str) -> bool {
 fn check_literal_trailing(i: usize, literal: &str, call_expr_arg_len: usize) -> bool {
     i != call_expr_arg_len - 1 && literal.ends_with(' ')
 }
-fn report_diagnostic(
+fn report_diagnostic<'a>(
     direction: &'static str,
-    ident: &str,
+    ident: &'a str,
     span: Span,
-    literal_raw: &str,
+    literal_raw: &'a str,
     is_template_lit: bool,
-    ctx: &LintContext,
+    ctx: &LintContext<'a>,
 ) {
-    let (start, end) =
-        if is_template_lit { (span.start, span.end) } else { (span.start + 1, span.end - 1) };
+    let span = if is_template_lit { span } else { Span::new(span.start + 1, span.end - 1) };
 
-    let fix = if is_template_lit {
-        format!("`{}`", literal_raw.trim())
-    } else {
-        literal_raw.trim().to_string()
-    };
-
-    ctx.diagnostic_with_fix(NoConsoleSpacesDiagnostic(direction, ident.to_string(), span), || {
-        Fix::new(fix, Span { start, end })
+    ctx.diagnostic_with_fix(no_console_spaces_diagnostic(direction, ident, span), |fixer| {
+        let content = if is_template_lit {
+            Cow::Owned(format!("`{}`", literal_raw.trim()))
+        } else {
+            Cow::Borrowed(literal_raw.trim())
+        };
+        fixer.replace(span, content)
     });
 }
 
@@ -251,5 +253,7 @@ fn test() {
         ("console.error(foo, ` bar`)", "console.error(foo, `bar`)", None),
     ];
 
-    Tester::new(NoConsoleSpaces::NAME, pass, fail).expect_fix(fix).test_and_snapshot();
+    Tester::new(NoConsoleSpaces::NAME, NoConsoleSpaces::PLUGIN, pass, fail)
+        .expect_fix(fix)
+        .test_and_snapshot();
 }

@@ -1,37 +1,29 @@
-#[cfg(not(target_env = "msvc"))]
-#[global_allocator]
-static GLOBAL: jemallocator::Jemalloc = jemallocator::Jemalloc;
-
-#[cfg(target_os = "windows")]
-#[global_allocator]
-static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
-
 use oxc_allocator::Allocator;
-use oxc_benchmark::{criterion_group, criterion_main, BenchmarkId, Criterion};
+use oxc_benchmark::{BenchmarkId, Criterion, black_box, criterion_group, criterion_main};
 use oxc_parser::Parser;
 use oxc_semantic::SemanticBuilder;
 use oxc_span::SourceType;
 use oxc_tasks_common::TestFiles;
-use std::path::PathBuf;
 
 fn bench_semantic(criterion: &mut Criterion) {
     let mut group = criterion.benchmark_group("semantic");
-    for file in TestFiles::minimal().files() {
-        group.bench_with_input(
-            BenchmarkId::from_parameter(&file.file_name),
-            &file.source_text,
-            |b, source_text| {
-                let source_type = SourceType::from_path(&file.file_name).unwrap();
-                let allocator = Allocator::default();
-                let ret = Parser::new(&allocator, source_text, SourceType::default()).parse();
-                let program = allocator.alloc(ret.program);
-                b.iter_with_large_drop(|| {
-                    SemanticBuilder::new(source_text, source_type)
-                        .build_module_record(PathBuf::new(), program)
-                        .build(program)
-                });
-            },
-        );
+    for file in TestFiles::complicated().files() {
+        let id = BenchmarkId::from_parameter(&file.file_name);
+        let source_text = file.source_text.as_str();
+        let source_type = SourceType::from_path(&file.file_name).unwrap();
+        group.bench_function(id, |b| {
+            let allocator = Allocator::default();
+            let ret = Parser::new(&allocator, source_text, source_type).parse();
+            b.iter_with_large_drop(|| {
+                // We drop `Semantic` inside this closure as drop time is part of cost of using this API.
+                // We return `error`s to be dropped outside of the measured section, as usually
+                // code would have no errors. One of our benchmarks `cal.com.tsx` has a lot of errors,
+                // but that's atypical, so don't want to include it in benchmark time.
+                let ret = SemanticBuilder::new().with_build_jsdoc(true).build(&ret.program);
+                let ret = black_box(ret);
+                ret.errors
+            });
+        });
     }
     group.finish();
 }

@@ -1,18 +1,18 @@
 use oxc_ast::AstKind;
-use oxc_diagnostics::{
-    miette::{self, Diagnostic},
-    thiserror::{self, Error},
-};
+use oxc_diagnostics::OxcDiagnostic;
 use oxc_macros::declare_oxc_lint;
 use oxc_span::Span;
-use phf::{phf_map, Map};
+use phf::{Map, phf_map};
 
-use crate::{context::LintContext, rule::Rule, AstNode};
+use crate::{
+    AstNode,
+    context::{ContextHost, LintContext},
+    rule::Rule,
+};
 
-#[derive(Debug, Error, Diagnostic)]
-#[error("eslint-plugin-react(no-unescaped-entities): `{1}` can be escaped with {2}")]
-#[diagnostic(severity(warning))]
-struct NoUnescapedEntitiesDiagnostic(#[label] pub Span, pub char, pub String);
+fn no_unescaped_entities_diagnostic(span: Span, unescaped: char, escaped: &str) -> OxcDiagnostic {
+    OxcDiagnostic::warn(format!("`{unescaped}` can be escaped with {escaped}")).with_label(span)
+}
 
 #[derive(Debug, Default, Clone)]
 pub struct NoUnescapedEntities;
@@ -43,6 +43,7 @@ declare_oxc_lint!(
     /// <div> {'>'} </div>
     /// ```
     NoUnescapedEntities,
+    react,
     pedantic
 );
 
@@ -51,21 +52,31 @@ impl Rule for NoUnescapedEntities {
         if let AstKind::JSXText(jsx_text) = node.kind() {
             let source = jsx_text.span.source_text(ctx.source_text());
             for (i, char) in source.char_indices() {
+                if !CHARS.contains(&char) {
+                    continue;
+                }
                 if let Some(escapes) = DEFAULTS.get(&char) {
-                    #[allow(clippy::cast_possible_truncation)]
-                    ctx.diagnostic(NoUnescapedEntitiesDiagnostic(
-                        Span {
-                            start: jsx_text.span.start + i as u32,
-                            end: jsx_text.span.start + i as u32 + 1,
-                        },
+                    #[expect(clippy::cast_possible_truncation)]
+                    ctx.diagnostic(no_unescaped_entities_diagnostic(
+                        Span::new(
+                            jsx_text.span.start + i as u32,
+                            jsx_text.span.start + i as u32 + 1,
+                        ),
                         char,
-                        escapes.join(" or "),
+                        &escapes.join(" or "),
                     ));
                 }
             }
         }
     }
+
+    fn should_run(&self, ctx: &ContextHost) -> bool {
+        ctx.source_type().is_jsx()
+    }
 }
+
+// NOTE: If we add substantially more characters, we should consider using a hash set instead.
+pub const CHARS: [char; 4] = ['>', '"', '\'', '}'];
 
 pub const DEFAULTS: Map<char, &'static [&'static str]> = phf_map! {
     '>' => &["&gt;"],
@@ -183,5 +194,6 @@ fn test() {
         r#"<script>测试 " 测试</script>"#,
     ];
 
-    Tester::new_without_config(NoUnescapedEntities::NAME, pass, fail).test_and_snapshot();
+    Tester::new(NoUnescapedEntities::NAME, NoUnescapedEntities::PLUGIN, pass, fail)
+        .test_and_snapshot();
 }

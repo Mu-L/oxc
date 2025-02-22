@@ -1,47 +1,45 @@
 [package]
-name                  = "oxc_coverage"
-version               = "0.0.0"
-publish               = false
-authors.workspace     = true
+name = "oxc_coverage"
+version = "0.0.0"
+authors.workspace = true
+edition.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+license.workspace = true
+publish = false
+repository.workspace = true
 description.workspace = true
-edition.workspace     = true
-homepage.workspace    = true
-keywords.workspace    = true
-license.workspace     = true
-repository.workspace  = true
+
+[lints]
+workspace = true
 
 [lib]
 doctest = false
 
+[[bin]]
+name = "oxc_coverage"
+test = false
+doctest = false
+
 [dependencies]
-oxc_allocator    = { workspace = true }
-oxc_parser       = { workspace = true }
-oxc_ast          = { workspace = true, features = ["serde"] }
-oxc_codegen      = { workspace = true }
-oxc_diagnostics  = { workspace = true }
-oxc_semantic     = { workspace = true }
-oxc_minifier     = { workspace = true }
-oxc_span         = { workspace = true }
+oxc = { workspace = true, features = ["full", "isolated_declarations", "serialize"] }
+oxc_prettier = { workspace = true }
 oxc_tasks_common = { workspace = true }
+oxc_tasks_transform_checker = { workspace = true }
 
-serde        = { workspace = true, features = ["derive"] }
-serde_json   = { workspace = true }
-rayon        = { workspace = true }
-miette       = { workspace = true, features = ["fancy-no-backtrace"] }
-project-root = { workspace = true }
-pico-args    = { workspace = true }
-lazy_static  = { workspace = true }
-walkdir      = { workspace = true }
-regex        = { workspace = true }
-
-console        = "0.15.7"
-encoding_rs    = "0.8.33"
-encoding_rs_io = "0.1.7"
-serde_yaml     = "0.9.27"
-similar        = "2.3.0"
-
-[target.'cfg(not(target_env = "msvc"))'.dependencies]
-jemallocator = { workspace = true }
-
-[target.'cfg(target_os = "windows")'.dependencies]
-mimalloc = { workspace = true }
+console = { workspace = true }
+cow-utils = { workspace = true }
+encoding_rs = { workspace = true }
+encoding_rs_io = { workspace = true }
+futures = { workspace = true }
+lazy_static = { workspace = true }
+pico-args = { workspace = true }
+rayon = { workspace = true }
+regex = { workspace = true }
+rustc-hash = { workspace = true }
+saphyr = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true, features = ["unbounded_depth", "preserve_order"] }
+similar = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+walkdir = { workspace = true }

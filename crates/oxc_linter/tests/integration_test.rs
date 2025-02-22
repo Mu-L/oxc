@@ -1,4 +1,4 @@
-use oxc_linter::rule::{RuleCategory, RuleMeta};
+use oxc_linter::{RuleCategory, RuleMeta};
 use oxc_macros::declare_oxc_lint_test;
 
 struct TestRule;
@@ -7,17 +7,19 @@ declare_oxc_lint_test!(
     /// Dummy description
     /// # which is multiline
     TestRule,
+    eslint,
     correctness
 );
 
 struct TestRule2 {
-    #[allow(dead_code)]
+    #[expect(dead_code)]
     dummy_field: u8,
 }
 
 declare_oxc_lint_test!(
     /// Dummy description2
     TestRule2,
+    eslint,
     correctness
 );
 
@@ -31,4 +33,7 @@ fn test_declare_oxc_lint() {
 
     // Auto-generated kebab-case name
     assert_eq!(TestRule::NAME, "test-rule");
+
+    // plugin name is passed to const
+    assert_eq!(TestRule::PLUGIN, "eslint");
 }

@@ -1,20 +1,16 @@
 use oxc_ast::{
-    ast::{Argument, Expression},
     AstKind,
+    ast::{Argument, Expression},
 };
-use oxc_diagnostics::{
-    miette::{self, Diagnostic},
-    thiserror::Error,
-};
+use oxc_diagnostics::OxcDiagnostic;
 use oxc_macros::declare_oxc_lint;
 use oxc_span::Span;
 
-use crate::{context::LintContext, rule::Rule, AstNode};
+use crate::{AstNode, context::LintContext, rule::Rule};
 
-#[derive(Debug, Error, Diagnostic)]
-#[error("eslint(no-async-promise-executor): Promise executor functions should not be `async`.")]
-#[diagnostic(severity(warning))]
-struct NoAsyncPromiseExecutorDiagnostic(#[label] pub Span);
+fn no_async_promise_executor_diagnostic(span: Span) -> OxcDiagnostic {
+    OxcDiagnostic::warn("Promise executor functions should not be `async`.").with_label(span)
+}
 
 #[derive(Debug, Default, Clone)]
 pub struct NoAsyncPromiseExecutor;
@@ -46,28 +42,31 @@ declare_oxc_lint!(
     /// - If an async executor function throws an error, the error will be lost and won’t cause the newly-constructed `Promise` to reject.This could make it difficult to debug and handle some errors.
     /// - If a Promise executor function is using `await`, this is usually a sign that it is not actually necessary to use the `new Promise` constructor, or the scope of the `new Promise` constructor can be reduced.
     NoAsyncPromiseExecutor,
+    eslint,
     correctness
 );
 
 impl Rule for NoAsyncPromiseExecutor {
     fn run<'a>(&self, node: &AstNode<'a>, ctx: &LintContext<'a>) {
-        let AstKind::NewExpression(new_expression) = node.kind() else { return };
+        let AstKind::NewExpression(new_expression) = node.kind() else {
+            return;
+        };
         if !new_expression.callee.is_specific_id("Promise") {
             return;
         }
-        let Some(Argument::Expression(expression)) = new_expression.arguments.first() else {
+        let Some(expression) = new_expression.arguments.first().and_then(Argument::as_expression)
+        else {
             return;
         };
         let mut span = match expression.get_inner_expression() {
-            Expression::ArrowExpression(arrow) if arrow.r#async => arrow.span,
+            Expression::ArrowFunctionExpression(arrow) if arrow.r#async => arrow.span,
             Expression::FunctionExpression(func) if func.r#async => func.span,
-
             _ => return,
         };
 
         span.end = span.start + 5;
 
-        ctx.diagnostic(NoAsyncPromiseExecutorDiagnostic(span));
+        ctx.diagnostic(no_async_promise_executor_diagnostic(span));
     }
 }
 
@@ -87,5 +86,6 @@ fn test() {
         ("new Promise(((((async () => {})))))", None),
     ];
 
-    Tester::new(NoAsyncPromiseExecutor::NAME, pass, fail).test_and_snapshot();
+    Tester::new(NoAsyncPromiseExecutor::NAME, NoAsyncPromiseExecutor::PLUGIN, pass, fail)
+        .test_and_snapshot();
 }

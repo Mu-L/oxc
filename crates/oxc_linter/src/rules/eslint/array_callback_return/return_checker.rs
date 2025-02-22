@@ -1,4 +1,5 @@
 use oxc_ast::ast::{BlockStatement, FunctionBody, Statement, SwitchCase};
+use oxc_ecmascript::{ToBoolean, is_global_reference::WithoutGlobalReferenceInformation};
 
 /// `StatementReturnStatus` describes whether the CFG corresponding to
 /// the statement is termitated by return statement in all/some/nome of
@@ -133,14 +134,14 @@ pub fn check_statement(statement: &Statement) -> StatementReturnStatus {
             let right =
                 stmt.alternate.as_ref().map_or(StatementReturnStatus::NotReturn, check_statement);
 
-            test.get_boolean_value()
+            test.to_boolean(&WithoutGlobalReferenceInformation {})
                 .map_or_else(|| left.join(right), |val| if val { left } else { right })
         }
 
         Statement::WhileStatement(stmt) => {
             let test = &stmt.test;
             let inner_return = check_statement(&stmt.body);
-            if test.get_boolean_value() == Some(true) {
+            if test.to_boolean(&WithoutGlobalReferenceInformation {}) == Some(true) {
                 inner_return
             } else {
                 inner_return.join(StatementReturnStatus::NotReturn)
@@ -245,7 +246,7 @@ pub fn check_block_statement(block: &BlockStatement) -> StatementReturnStatus {
 #[cfg(test)]
 mod tests {
     use oxc_allocator::Allocator;
-    use oxc_ast::ast::{Declaration, Program};
+    use oxc_ast::ast::Program;
     use oxc_parser::Parser;
     use oxc_span::SourceType;
 
@@ -262,9 +263,7 @@ mod tests {
         let program = ret.program;
         let Program { body, .. } = program;
         let stmt = body.first().unwrap();
-        let Statement::Declaration(Declaration::FunctionDeclaration(func)) = stmt else {
-            unreachable!()
-        };
+        let Statement::FunctionDeclaration(func) = stmt else { unreachable!() };
 
         let first_statement = &func.body.as_ref().unwrap().statements[0];
 
@@ -281,7 +280,7 @@ mod tests {
     fn test_switch_always_explicit() {
         // Return Explicit
         let always_explicit = r#"
-    function() {
+    function d() {
       switch (a) {
         case "C":
           switch (b) {
@@ -301,7 +300,7 @@ mod tests {
     #[test]
     fn test_switch_always_implicit() {
         let always_implicit = r#"
-    function() {
+    function d() {
       switch (a) {
         case "C":
           switch (b) {
@@ -321,7 +320,7 @@ mod tests {
     #[test]
     fn test_switch_always_mixed() {
         let always_mixed = r#"
-        function() {
+        function d() {
           switch (a) {
             case "C":
               switch (b) {
@@ -370,7 +369,7 @@ mod tests {
 
     #[test]
     fn test_if_always_true() {
-        let always_true = r#"
+        let always_true = r"
       function foo() {
         if (true) return 1;
         else {
@@ -378,13 +377,13 @@ mod tests {
           console.log(a);
         }
       }
-    "#;
+    ";
         parse_statement_and_test(always_true, StatementReturnStatus::AlwaysExplicit);
     }
 
     #[test]
     fn test_if_always_false() {
-        let always_false = r#"
+        let always_false = r"
         function foo() {
           if (false) {
             var a = 123;
@@ -392,13 +391,13 @@ mod tests {
             return 123;
           }
         }
-      "#;
+      ";
         parse_statement_and_test(always_false, StatementReturnStatus::AlwaysExplicit);
     }
 
     #[test]
     fn test_if_non_static() {
-        let non_static = r#"
+        let non_static = r"
         function foo() {
           if (a) {
             return 123;
@@ -406,14 +405,14 @@ mod tests {
             var c = 0;
           }
         }
-      "#;
+      ";
         parse_statement_and_test(non_static, StatementReturnStatus::SomeExplicit);
     }
 
     #[test]
     fn test_block() {
         // The block statement could: return a, return, or does not return in the end
-        let source = r#"
+        let source = r"
         function foo() {
           {
             if (a) {
@@ -425,7 +424,7 @@ mod tests {
             }
           }
         }
-      "#;
+      ";
 
         parse_statement_and_test(source, StatementReturnStatus::SomeMixed);
     }

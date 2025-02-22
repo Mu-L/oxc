@@ -1,23 +1,23 @@
 use oxc_ast::{
-    ast::{Argument, Expression, JSXAttributeItem, JSXAttributeName, ObjectPropertyKind},
     AstKind,
+    ast::{Argument, JSXAttributeItem, JSXAttributeName, ObjectPropertyKind},
 };
-use oxc_diagnostics::{
-    miette::{self, Diagnostic},
-    thiserror::Error,
-};
+use oxc_diagnostics::OxcDiagnostic;
 use oxc_macros::declare_oxc_lint;
 use oxc_span::{GetSpan, Span};
 
-use crate::{context::LintContext, rule::Rule, utils::is_create_element_call, AstNode};
+use crate::{
+    AstNode,
+    context::{ContextHost, LintContext},
+    rule::Rule,
+    utils::is_create_element_call,
+};
 
-#[derive(Debug, Error, Diagnostic)]
-#[error("eslint-plugin-react(no-children-prop): Avoid passing children using a prop.")]
-#[diagnostic(
-    severity(warning),
-    help("The canonical way to pass children in React is to use JSX elements")
-)]
-struct NoChildrenPropDiagnostic(#[label] pub Span);
+fn no_children_prop_diagnostic(span: Span) -> OxcDiagnostic {
+    OxcDiagnostic::warn("Avoid passing children using a prop.")
+        .with_help("The canonical way to pass children in React is to use JSX elements")
+        .with_label(span)
+}
 
 #[derive(Debug, Default, Clone)]
 pub struct NoChildrenProp;
@@ -25,23 +25,27 @@ pub struct NoChildrenProp;
 declare_oxc_lint!(
     /// ### What it does
     ///
+    /// Checks that children are not passed using a prop.
+    ///
+    /// Why is this bad?
+    ///
     /// Children should always be actual children, not passed in as a prop.
-    ///
     /// When using JSX, the children should be nested between the opening and closing tags.
-    ///
     /// When not using JSX, the children should be passed as additional arguments to `React.createElement`.
     ///
     /// ### Example
-    /// ```javascript
-    /// // Bad
+    ///
+    /// Examples of **incorrect** code for this rule:
+    /// ```jsx
     /// <div children='Children' />
     ///
     /// <MyComponent children={<AnotherComponent />} />
     /// <MyComponent children={['Child 1', 'Child 2']} />
     /// React.createElement("div", { children: 'Children' })
+    /// ```
     ///
-    /// // Good
-    ///
+    /// Examples of **correct** code for this rule:
+    /// ```jsx
     /// <div>Children</div>
     /// <MyComponent>Children</MyComponent>
     ///
@@ -52,10 +56,9 @@ declare_oxc_lint!(
     ///
     /// React.createElement("div", {}, 'Children')
     /// React.createElement("div", 'Child 1', 'Child 2')
-    ///
-    ///
     /// ```
     NoChildrenProp,
+    react,
     correctness
 );
 
@@ -63,16 +66,16 @@ impl Rule for NoChildrenProp {
     fn run<'a>(&self, node: &AstNode<'a>, ctx: &LintContext<'a>) {
         match node.kind() {
             AstKind::JSXAttributeItem(JSXAttributeItem::Attribute(attr)) => {
-                let JSXAttributeName::Identifier(attr_ident) = &attr.name else { return };
+                let JSXAttributeName::Identifier(attr_ident) = &attr.name else {
+                    return;
+                };
                 if attr_ident.name == "children" {
-                    ctx.diagnostic(NoChildrenPropDiagnostic(attr_ident.span));
+                    ctx.diagnostic(no_children_prop_diagnostic(attr_ident.span));
                 }
             }
             AstKind::CallExpression(call_expr) => {
                 if is_create_element_call(call_expr) {
-                    if let Some(Argument::Expression(Expression::ObjectExpression(obj_expr))) =
-                        call_expr.arguments.get(1)
-                    {
+                    if let Some(Argument::ObjectExpression(obj_expr)) = call_expr.arguments.get(1) {
                         if let Some(span) = obj_expr.properties.iter().find_map(|prop| {
                             if let ObjectPropertyKind::ObjectProperty(prop) = prop {
                                 if prop.key.is_specific_static_name("children") {
@@ -82,13 +85,17 @@ impl Rule for NoChildrenProp {
 
                             None
                         }) {
-                            ctx.diagnostic(NoChildrenPropDiagnostic(span));
+                            ctx.diagnostic(no_children_prop_diagnostic(span));
                         }
                     }
                 }
             }
             _ => {}
         }
+    }
+
+    fn should_run(&self, ctx: &ContextHost) -> bool {
+        ctx.source_type().is_jsx()
     }
 }
 
@@ -140,10 +147,10 @@ fn test() {
 
     #[rustfmt::skip]
     let fail = vec![
-        (r#"<div children />;"#, None),
+        (r"<div children />;", None),
         (r#"<div children="Children" />;"#, None),
-        (r#"<div children={<div />} />;"#, None),
-        (r#"<div children={[<div />, <div />]} />;"#, None),
+        (r"<div children={<div />} />;", None),
+        (r"<div children={[<div />, <div />]} />;", None),
         (r#"<div children="Children">Children</div>;"#, None),
         (r#"React.createElement("div", {children: "Children"});"#, None),
         (r#"React.createElement("div", {children: "Children"}, "Children");"#, None),
@@ -157,5 +164,5 @@ fn test() {
         (r#"React.createElement(MyComponent, {...props, children: "Children"})"#, None),
     ];
 
-    Tester::new(NoChildrenProp::NAME, pass, fail).test_and_snapshot();
+    Tester::new(NoChildrenProp::NAME, NoChildrenProp::PLUGIN, pass, fail).test_and_snapshot();
 }

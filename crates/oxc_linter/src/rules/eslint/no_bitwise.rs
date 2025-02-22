@@ -1,26 +1,32 @@
 use oxc_ast::AstKind;
-use oxc_diagnostics::{
-    miette::{self, Diagnostic},
-    thiserror::Error,
-};
+use oxc_diagnostics::OxcDiagnostic;
 use oxc_macros::declare_oxc_lint;
-use oxc_span::Span;
+use oxc_span::{CompactStr, Span};
 use oxc_syntax::operator::BinaryOperator;
 
-use crate::{context::LintContext, rule::Rule, AstNode};
+use crate::{AstNode, context::LintContext, rule::Rule};
 
-#[derive(Debug, Error, Diagnostic)]
-#[error("eslint(no-bitwise): Unexpected use of {0:?}")]
-#[diagnostic(
-    severity(warning),
-    help("bitwise operators are not allowed, maybe you mistyped `&&` or `||`")
-)]
-struct NoBitwiseDiagnostic(&'static str, #[label] pub Span);
+fn no_bitwise_diagnostic(x0: &str, span1: Span) -> OxcDiagnostic {
+    OxcDiagnostic::warn(format!("Unexpected use of {x0:?}"))
+        .with_help("bitwise operators are not allowed, maybe you mistyped `&&` or `||`")
+        .with_label(span1)
+}
 
 #[derive(Debug, Default, Clone)]
-pub struct NoBitwise {
-    allow: Vec<String>,
+pub struct NoBitwise(Box<NoBitwiseConfig>);
+
+#[derive(Debug, Default, Clone)]
+pub struct NoBitwiseConfig {
+    allow: Vec<CompactStr>,
     int32_hint: bool,
+}
+
+impl std::ops::Deref for NoBitwise {
+    type Target = NoBitwiseConfig;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
 }
 
 declare_oxc_lint!(
@@ -33,12 +39,64 @@ declare_oxc_lint!(
     /// The use of bitwise operators in JavaScript is very rare and often `&` or `|` is simply a mistyped `&&` or `||`,
     /// which will lead to unexpected behavior.
     ///
-    /// ### Example
+    /// ### Examples
     ///
+    /// Examples of **incorrect** code for this rule:
     /// ```javascript
     /// var x = y | z;
     /// ```
+    ///
+    /// ```javascript
+    /// var x = y ^ z;
+    /// ```
+    ///
+    /// ```javascript
+    /// var x = y >> z;
+    /// ```
+    ///
+    /// Examples of **correct** code for this rule:
+    /// ```javascript
+    /// var x = y || z;
+    /// ```
+    ///
+    /// ```javascript
+    /// var x = y && z;
+    /// ```
+    ///
+    /// ```javascript
+    /// var x = y > z;
+    /// ```
+    ///
+    /// ### Options
+    ///
+    /// ### allow
+    ///
+    /// `{ "allow": string[] }`
+    ///
+    /// The`allow` option permits the given list of bitwise operators to be used
+    /// as exceptions to this rule.
+    ///
+    /// For example `{ "allow": ["~"] }` would allow the use of the bitwise operator
+    /// `~` without restriction. Such as in the following:
+    ///
+    /// ```javascript
+    /// ~[1,2,3].indexOf(1) === -1;
+    /// ```
+    ///
+    /// ### int32Hint
+    ///
+    /// `{ "int32Hint": boolean }`
+    ///
+    /// When set to true the `int32Hint` option allows the use of bitwise OR in |0
+    /// pattern for type casting.
+    ///
+    /// For example with `{ "int32Hint": true }` the following is permitted:
+    ///
+    /// ```javascript
+    /// const b = a|0;
+    /// ``````
     NoBitwise,
+    eslint,
     restriction
 );
 
@@ -46,22 +104,19 @@ impl Rule for NoBitwise {
     fn from_configuration(value: serde_json::Value) -> Self {
         let obj = value.get(0);
 
-        Self {
+        Self(Box::new(NoBitwiseConfig {
             allow: obj
                 .and_then(|v| v.get("allow"))
                 .and_then(serde_json::Value::as_array)
                 .map(|v| {
-                    v.iter()
-                        .filter_map(serde_json::Value::as_str)
-                        .map(ToString::to_string)
-                        .collect()
+                    v.iter().filter_map(serde_json::Value::as_str).map(CompactStr::from).collect()
                 })
                 .unwrap_or_default(),
             int32_hint: obj
                 .and_then(|v| v.get("int32Hint"))
                 .and_then(serde_json::Value::as_bool)
                 .unwrap_or_default(),
-        }
+        }))
     }
 
     fn run<'a>(&self, node: &AstNode<'a>, ctx: &LintContext<'a>) {
@@ -73,7 +128,7 @@ impl Rule for NoBitwise {
                     && !allowed_operator(&self.allow, op)
                     && !is_int32_hint(self.int32_hint, node)
                 {
-                    ctx.diagnostic(NoBitwiseDiagnostic(op, bin_expr.span));
+                    ctx.diagnostic(no_bitwise_diagnostic(op, bin_expr.span));
                 }
             }
             AstKind::UnaryExpression(unary_expr) => {
@@ -83,7 +138,7 @@ impl Rule for NoBitwise {
                     && !allowed_operator(&self.allow, op)
                     && !is_int32_hint(self.int32_hint, node)
                 {
-                    ctx.diagnostic(NoBitwiseDiagnostic(op, unary_expr.span));
+                    ctx.diagnostic(no_bitwise_diagnostic(op, unary_expr.span));
                 }
             }
             AstKind::AssignmentExpression(assign_expr) => {
@@ -93,7 +148,7 @@ impl Rule for NoBitwise {
                     && !allowed_operator(&self.allow, op)
                     && !is_int32_hint(self.int32_hint, node)
                 {
-                    ctx.diagnostic(NoBitwiseDiagnostic(op, assign_expr.span));
+                    ctx.diagnostic(no_bitwise_diagnostic(op, assign_expr.span));
                 }
             }
             _ => {}
@@ -101,7 +156,7 @@ impl Rule for NoBitwise {
     }
 }
 
-fn allowed_operator(allow: &[String], operator: &str) -> bool {
+fn allowed_operator(allow: &[CompactStr], operator: &str) -> bool {
     allow.iter().any(|s| s == operator)
 }
 
@@ -133,6 +188,8 @@ fn test() {
         ("a &&= b", None),
         ("a ||= b", None),
         ("a ??= b", None),
+        ("a > b", None),
+        ("a < b", None),
         ("~[1, 2, 3].indexOf(1)", Some(json!([ { "allow": ["~"] }]))),
         ("~1<<2 === -8", Some(json!([ { "allow": ["~", "<<"] }]))),
         ("a|0", Some(json!([ { "int32Hint": true}]))),
@@ -155,5 +212,5 @@ fn test() {
         ("a >>>= b", None),
     ];
 
-    Tester::new(NoBitwise::NAME, pass, fail).test_and_snapshot();
+    Tester::new(NoBitwise::NAME, NoBitwise::PLUGIN, pass, fail).test_and_snapshot();
 }

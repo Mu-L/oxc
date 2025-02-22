@@ -1,39 +1,18 @@
-use std::cell::Cell;
-
 use oxc_allocator::Box;
-use oxc_ast::{ast::*, AstBuilder};
+use oxc_ast::ast::*;
 use oxc_diagnostics::Result;
-use oxc_span::{GetSpan, Span};
+use oxc_span::Span;
 
-use super::list::FormalParameterList;
-use crate::{diagnostics, lexer::Kind, list::SeparatedList, Context, Parser, StatementContext};
-
-type ArrowFunctionHead<'a> = (
-    Option<Box<'a, TSTypeParameterDeclaration<'a>>>,
-    Box<'a, FormalParameters<'a>>,
-    Option<Box<'a, TSTypeAnnotation<'a>>>,
-    bool,
-    Span,
-);
-
-#[derive(Debug, Clone, Copy)]
-pub enum IsParenthesizedArrowFunction {
-    True,
-    False,
-    Maybe,
-}
-
-#[derive(Debug, Clone, Copy, Eq, PartialEq)]
-pub enum FunctionKind {
-    Declaration { single_statement: bool },
-    Expression,
-    DefaultExport,
-    TSDeclaration,
-}
+use super::FunctionKind;
+use crate::{
+    Context, ParserImpl, StatementContext, diagnostics,
+    lexer::Kind,
+    modifiers::{ModifierFlags, ModifierKind, Modifiers},
+};
 
 impl FunctionKind {
     pub(crate) fn is_id_required(self) -> bool {
-        matches!(self, Self::Declaration { single_statement: true })
+        matches!(self, Self::Declaration)
     }
 
     pub(crate) fn is_expression(self) -> bool {
@@ -41,7 +20,7 @@ impl FunctionKind {
     }
 }
 
-impl<'a> Parser<'a> {
+impl<'a> ParserImpl<'a> {
     pub(crate) fn at_function_with_async(&mut self) -> bool {
         self.at(Kind::Function)
             || self.at(Kind::Async)
@@ -49,86 +28,158 @@ impl<'a> Parser<'a> {
                 && !self.peek_token().is_on_new_line
     }
 
-    pub(crate) fn at_async_no_new_line(&mut self) -> bool {
-        self.at(Kind::Async) && !self.cur_token().escaped && !self.peek_token().is_on_new_line
-    }
-
     pub(crate) fn parse_function_body(&mut self) -> Result<Box<'a, FunctionBody<'a>>> {
         let span = self.start_span();
         self.expect(Kind::LCurly)?;
 
-        let (directives, statements) = self.with_context(Context::Return, |p| {
+        let (directives, statements) = self.context(Context::Return, Context::empty(), |p| {
             p.parse_directives_and_statements(/* is_top_level */ false)
         })?;
 
         self.expect(Kind::RCurly)?;
-        Ok(self.ast.function_body(self.end_span(span), directives, statements))
+        Ok(self.ast.alloc_function_body(self.end_span(span), directives, statements))
     }
 
     pub(crate) fn parse_formal_parameters(
         &mut self,
         params_kind: FormalParameterKind,
-    ) -> Result<Box<'a, FormalParameters<'a>>> {
+    ) -> Result<(Option<TSThisParameter<'a>>, Box<'a, FormalParameters<'a>>)> {
         let span = self.start_span();
-        let list = FormalParameterList::parse(self)?;
-        Ok(self.ast.formal_parameters(self.end_span(span), params_kind, list.elements, list.rest))
+        self.expect(Kind::LParen)?;
+        let this_param = if self.is_ts && self.at(Kind::This) {
+            let param = self.parse_ts_this_parameter()?;
+            if !self.at(Kind::RParen) {
+                self.expect(Kind::Comma)?;
+            }
+            Some(param)
+        } else {
+            None
+        };
+        let (list, rest) = self.parse_delimited_list_with_rest(
+            Kind::RParen,
+            Self::parse_formal_parameter,
+            Self::parse_rest_parameter,
+        )?;
+        self.expect(Kind::RParen)?;
+        let formal_parameters =
+            self.ast.alloc_formal_parameters(self.end_span(span), params_kind, list, rest);
+        Ok((this_param, formal_parameters))
+    }
+
+    fn parse_parameter_modifiers(&mut self) -> Modifiers<'a> {
+        let modifiers = self.parse_class_element_modifiers(true);
+        self.verify_modifiers(
+            &modifiers,
+            ModifierFlags::ACCESSIBILITY
+                .union(ModifierFlags::READONLY)
+                .union(ModifierFlags::OVERRIDE),
+            diagnostics::cannot_appear_on_a_parameter,
+        );
+        modifiers
+    }
+
+    fn parse_formal_parameter(&mut self) -> Result<FormalParameter<'a>> {
+        let span = self.start_span();
+        self.eat_decorators()?;
+        let modifiers = self.parse_parameter_modifiers();
+        let pattern = self.parse_binding_pattern_with_initializer()?;
+        let decorators = self.consume_decorators();
+        Ok(self.ast.formal_parameter(
+            self.end_span(span),
+            decorators,
+            pattern,
+            modifiers.accessibility(),
+            modifiers.contains_readonly(),
+            modifiers.contains_override(),
+        ))
+    }
+
+    fn parse_rest_parameter(&mut self) -> Result<BindingRestElement<'a>> {
+        let element = self.parse_rest_element()?;
+        if self.at(Kind::Comma) {
+            if matches!(self.peek_kind(), Kind::RCurly | Kind::RBrack) {
+                let span = self.cur_token().span();
+                self.bump_any();
+                self.error(diagnostics::binding_rest_element_trailing_comma(span));
+            }
+            if !self.ctx.has_ambient() {
+                self.error(diagnostics::rest_parameter_last(element.span));
+            }
+        }
+        Ok(element)
     }
 
     pub(crate) fn parse_function(
         &mut self,
         span: Span,
-        id: Option<BindingIdentifier>,
+        id: Option<BindingIdentifier<'a>>,
         r#async: bool,
         generator: bool,
         func_kind: FunctionKind,
-        modifiers: Modifiers<'a>,
+        modifiers: &Modifiers<'a>,
     ) -> Result<Box<'a, Function<'a>>> {
         let ctx = self.ctx;
         self.ctx = self.ctx.and_in(true).and_await(r#async).and_yield(generator);
 
         let type_parameters = self.parse_ts_type_parameters()?;
 
-        let params = self.parse_formal_parameters(FormalParameterKind::FormalParameter)?;
+        let (this_param, params) =
+            self.parse_formal_parameters(FormalParameterKind::FormalParameter)?;
 
-        let return_type = self.parse_ts_return_type_annotation()?;
+        let return_type =
+            self.parse_ts_return_type_annotation(Kind::Colon, /* is_type */ true)?;
 
         let body = if self.at(Kind::LCurly) { Some(self.parse_function_body()?) } else { None };
 
         self.ctx =
             self.ctx.and_in(ctx.has_in()).and_await(ctx.has_await()).and_yield(ctx.has_yield());
 
-        if !self.ts_enabled() && body.is_none() {
+        if !self.is_ts && body.is_none() {
             return Err(self.unexpected());
         }
 
-        let function_type = if body.is_none() {
-            FunctionType::TSDeclareFunction
-        } else {
-            match func_kind {
-                FunctionKind::Declaration { .. } | FunctionKind::DefaultExport => {
+        let function_type = match func_kind {
+            FunctionKind::Declaration | FunctionKind::DefaultExport => {
+                if body.is_none() {
+                    FunctionType::TSDeclareFunction
+                } else {
                     FunctionType::FunctionDeclaration
                 }
-                FunctionKind::Expression { .. } => FunctionType::FunctionExpression,
-                FunctionKind::TSDeclaration { .. } => FunctionType::TSDeclareFunction,
             }
+            FunctionKind::Expression { .. } => {
+                if body.is_none() {
+                    FunctionType::TSEmptyBodyFunctionExpression
+                } else {
+                    FunctionType::FunctionExpression
+                }
+            }
+            FunctionKind::TSDeclaration { .. } => FunctionType::TSDeclareFunction,
         };
 
-        if FunctionType::TSDeclareFunction == function_type {
+        if FunctionType::TSDeclareFunction == function_type
+            || FunctionType::TSEmptyBodyFunctionExpression == function_type
+        {
             self.asi()?;
         }
 
-        Ok(self.ast.function(
-            function_type,
+        self.verify_modifiers(
+            modifiers,
+            ModifierFlags::DECLARE | ModifierFlags::ASYNC,
+            diagnostics::modifier_cannot_be_used_here,
+        );
+
+        Ok(self.ast.alloc_function(
             self.end_span(span),
+            function_type,
             id,
-            false, // expression
             generator,
             r#async,
-            params,
-            body,
+            modifiers.contains_declare(),
             type_parameters,
+            this_param,
+            params,
             return_type,
-            modifiers,
+            body,
         ))
     }
 
@@ -137,24 +188,23 @@ impl<'a> Parser<'a> {
         &mut self,
         stmt_ctx: StatementContext,
     ) -> Result<Statement<'a>> {
-        let func_kind =
-            FunctionKind::Declaration { single_statement: stmt_ctx.is_single_statement() };
+        let func_kind = FunctionKind::Declaration;
         let decl = self.parse_function_impl(func_kind)?;
         if stmt_ctx.is_single_statement() {
             if decl.r#async {
-                self.error(diagnostics::AsyncFunctionDeclaration(Span::new(
+                self.error(diagnostics::async_function_declaration(Span::new(
                     decl.span.start,
                     decl.params.span.end,
                 )));
             } else if decl.generator {
-                self.error(diagnostics::GeneratorFunctionDeclaration(Span::new(
+                self.error(diagnostics::generator_function_declaration(Span::new(
                     decl.span.start,
                     decl.params.span.end,
                 )));
             }
         }
 
-        Ok(self.ast.function_declaration(decl))
+        Ok(Statement::FunctionDeclaration(decl))
     }
 
     /// Parse function implementation in Javascript, cursor
@@ -167,8 +217,8 @@ impl<'a> Parser<'a> {
         let r#async = self.eat(Kind::Async);
         self.expect(Kind::Function)?;
         let generator = self.eat(Kind::Star);
-        let id = self.parse_function_id(func_kind, r#async, generator);
-        self.parse_function(span, id, r#async, generator, func_kind, Modifiers::empty())
+        let id = self.parse_function_id(func_kind, r#async, generator)?;
+        self.parse_function(span, id, r#async, generator, func_kind, &Modifiers::empty())
     }
 
     /// Parse function implementation in Typescript, cursor
@@ -177,12 +227,12 @@ impl<'a> Parser<'a> {
         &mut self,
         start_span: Span,
         func_kind: FunctionKind,
-        modifiers: Modifiers<'a>,
+        modifiers: &Modifiers<'a>,
     ) -> Result<Box<'a, Function<'a>>> {
         let r#async = modifiers.contains(ModifierKind::Async);
         self.expect(Kind::Function)?;
         let generator = self.eat(Kind::Star);
-        let id = self.parse_function_id(func_kind, r#async, generator);
+        let id = self.parse_function_id(func_kind, r#async, generator)?;
         self.parse_function(start_span, id, r#async, generator, func_kind, modifiers)
     }
 
@@ -196,66 +246,10 @@ impl<'a> Parser<'a> {
         self.expect(Kind::Function)?;
 
         let generator = self.eat(Kind::Star);
-        let id = self.parse_function_id(func_kind, r#async, generator);
+        let id = self.parse_function_id(func_kind, r#async, generator)?;
         let function =
-            self.parse_function(span, id, r#async, generator, func_kind, Modifiers::empty())?;
-
-        Ok(self.ast.function_expression(function))
-    }
-
-    pub(crate) fn parse_single_param_function_expression(
-        &mut self,
-        span: Span,
-        r#async: bool,
-        generator: bool,
-    ) -> Result<Expression<'a>> {
-        let has_await = self.ctx.has_await();
-        let has_yield = self.ctx.has_yield();
-
-        self.ctx = self.ctx.union_await_if(r#async).union_yield_if(generator);
-        let params_span = self.start_span();
-        let param = self.parse_binding_identifier()?;
-        let ident = self.ast.binding_pattern_identifier(param);
-        let pattern = self.ast.binding_pattern(ident, None, false);
-        let params_span = self.end_span(params_span);
-        let formal_parameter = self.ast.formal_parameter(
-            params_span,
-            pattern,
-            None,
-            false,
-            AstBuilder::new_vec(&self.ast),
-        );
-        let params = self.ast.formal_parameters(
-            params_span,
-            FormalParameterKind::ArrowFormalParameters,
-            self.ast.new_vec_single(formal_parameter),
-            None,
-        );
-
-        self.expect(Kind::Arrow)?;
-
-        self.ctx = self.ctx.and_await(r#async).and_yield(generator);
-        let expression = !self.at(Kind::LCurly);
-        let body = if expression {
-            let expr = self.parse_assignment_expression_base()?;
-            let span = expr.span();
-            let expr_stmt = self.ast.expression_statement(span, expr);
-            self.ast.function_body(span, self.ast.new_vec(), self.ast.new_vec_single(expr_stmt))
-        } else {
-            self.parse_function_body()?
-        };
-        self.ctx = self.ctx.and_await(has_await).and_yield(has_yield);
-
-        Ok(self.ast.arrow_expression(
-            self.end_span(span),
-            expression,
-            false,
-            r#async,
-            params,
-            body,
-            None,
-            None,
-        ))
+            self.parse_function(span, id, r#async, generator, func_kind, &Modifiers::empty())?;
+        Ok(Expression::FunctionExpression(function))
     }
 
     /// Section 15.4 Method Definitions
@@ -278,7 +272,7 @@ impl<'a> Parser<'a> {
             r#async,
             generator,
             FunctionKind::Expression,
-            Modifiers::empty(),
+            &Modifiers::empty(),
         )
     }
 
@@ -292,7 +286,7 @@ impl<'a> Parser<'a> {
 
         let has_yield = self.ctx.has_yield();
         if !has_yield {
-            self.error(diagnostics::YieldExpression(Span::new(span.start, span.start + 5)));
+            self.error(diagnostics::yield_expression(Span::new(span.start, span.start + 5)));
         }
 
         let mut delegate = false;
@@ -312,12 +306,12 @@ impl<'a> Parser<'a> {
             );
             if !not_assignment_expr || delegate {
                 self.ctx = self.ctx.union_yield_if(true);
-                argument = Some(self.parse_assignment_expression_base()?);
+                argument = Some(self.parse_assignment_expression_or_higher()?);
                 self.ctx = self.ctx.and_yield(has_yield);
             }
         }
 
-        Ok(self.ast.yield_expression(self.end_span(span), delegate, argument))
+        Ok(self.ast.expression_yield(self.end_span(span), delegate, argument))
     }
 
     // id: None - for AnonymousDefaultExportedFunctionDeclaration
@@ -326,7 +320,7 @@ impl<'a> Parser<'a> {
         kind: FunctionKind,
         r#async: bool,
         generator: bool,
-    ) -> Option<BindingIdentifier> {
+    ) -> Result<Option<BindingIdentifier<'a>>> {
         let ctx = self.ctx;
         if kind.is_expression() {
             self.ctx = self.ctx.and_await(r#async).and_yield(generator);
@@ -334,196 +328,20 @@ impl<'a> Parser<'a> {
         let id = self.cur_kind().is_binding_identifier().then(|| {
             let (span, name) = self.parse_identifier_kind(Kind::Ident);
             self.check_identifier(span, &name);
-            BindingIdentifier { span, name, symbol_id: Cell::default() }
+            self.ast.binding_identifier(span, name)
         });
         self.ctx = ctx;
 
         if kind.is_id_required() && id.is_none() {
-            self.error(diagnostics::ExpectFunctionName(self.cur_token().span()));
-        }
-
-        id
-    }
-
-    pub(crate) fn is_parenthesized_arrow_function_expression(
-        &mut self,
-        r#async: bool,
-    ) -> IsParenthesizedArrowFunction {
-        let offset = u8::from(r#async);
-
-        match self.nth_kind(offset) {
-            Kind::LParen => match self.nth_kind(offset + 1) {
-                // '()' is an arrow expression if followed by an '=>', a type annotation or body.
-                // Otherwise, a parenthesized expression with a missing inner expression
-                Kind::RParen => {
-                    let kind = self.nth_kind(offset + 2);
-                    if self.ts_enabled() && kind == Kind::Colon {
-                        IsParenthesizedArrowFunction::Maybe
-                    } else if matches!(kind, Kind::Arrow | Kind::LCurly) {
-                        IsParenthesizedArrowFunction::True
-                    } else {
-                        IsParenthesizedArrowFunction::False
-                    }
+            match self.cur_kind() {
+                Kind::LParen => {
+                    self.error(diagnostics::expect_function_name(self.cur_token().span()));
                 }
-                // Rest parameter
-                // '(...ident' is not a parenthesized expression
-                // '(...null' is a parenthesized expression
-                Kind::Dot3 => match self.nth_kind(offset + 1) {
-                    Kind::Ident => IsParenthesizedArrowFunction::True,
-                    kind if kind.is_literal() => IsParenthesizedArrowFunction::False,
-                    _ => IsParenthesizedArrowFunction::Maybe,
-                },
-                // '([ ...', '({ ... } can either be a parenthesized object or array expression or a destructing parameter
-                Kind::LBrack | Kind::LCurly => IsParenthesizedArrowFunction::Maybe,
-                _ if self.nth_kind(offset + 1).is_binding_identifier()
-                    || self.nth_at(offset + 1, Kind::This) =>
-                {
-                    match self.nth_kind(offset + 2) {
-                        // '(a: ' must be a type annotation
-                        Kind::Colon => IsParenthesizedArrowFunction::True,
-                        // * '(a = ': an initializer or a parenthesized assignment expression
-                        // * '(a, ': separator to next parameter or a parenthesized sequence expression
-                        // * '(a)': a single parameter OR a parenthesized expression
-                        Kind::Eq | Kind::Comma | Kind::RParen => {
-                            IsParenthesizedArrowFunction::Maybe
-                        }
-                        // '(a?:' | '(a?,' | '(a?=' | '(a?)'
-                        Kind::Question
-                            if matches!(
-                                self.nth_kind(offset + 3),
-                                Kind::Colon | Kind::Comma | Kind::Eq | Kind::RParen
-                            ) =>
-                        {
-                            IsParenthesizedArrowFunction::True
-                        }
-                        _ => IsParenthesizedArrowFunction::False,
-                    }
-                }
-                _ => IsParenthesizedArrowFunction::False,
-            },
-            Kind::LAngle => {
-                let kind = self.nth_kind(offset + 1);
-
-                // `<const` for const type parameter from TypeScript 5.0
-                if kind == Kind::Const {
-                    return IsParenthesizedArrowFunction::Maybe;
-                }
-
-                if !kind.is_identifier() {
-                    return IsParenthesizedArrowFunction::False;
-                }
-
-                if self.source_type.is_jsx() {
-                    return match self.nth_kind(offset + 2) {
-                        Kind::Extends => {
-                            let third_kind = self.nth_kind(offset + 3);
-                            if matches!(third_kind, Kind::Eq | Kind::RAngle) {
-                                IsParenthesizedArrowFunction::False
-                            } else if third_kind.is_identifier() {
-                                IsParenthesizedArrowFunction::Maybe
-                            } else {
-                                IsParenthesizedArrowFunction::True
-                            }
-                        }
-                        Kind::Eq | Kind::Comma => IsParenthesizedArrowFunction::True,
-                        _ => IsParenthesizedArrowFunction::False,
-                    };
-                }
-
-                IsParenthesizedArrowFunction::Maybe
+                kind if kind.is_reserved_keyword() => self.expect_without_advance(Kind::Ident)?,
+                _ => {}
             }
-            _ => IsParenthesizedArrowFunction::False,
-        }
-    }
-
-    pub(crate) fn is_parenthesized_arrow_function(&mut self) -> IsParenthesizedArrowFunction {
-        match self.cur_kind() {
-            Kind::LAngle | Kind::LParen => self.is_parenthesized_arrow_function_expression(false),
-            Kind::Async => {
-                let peeked = self.peek_token();
-                if !peeked.is_on_new_line && matches!(peeked.kind, Kind::LAngle | Kind::LParen) {
-                    self.is_parenthesized_arrow_function_expression(true)
-                } else {
-                    IsParenthesizedArrowFunction::False
-                }
-            }
-            _ => IsParenthesizedArrowFunction::False,
-        }
-    }
-
-    pub(crate) fn parse_parenthesized_arrow_function_head(
-        &mut self,
-    ) -> Result<ArrowFunctionHead<'a>> {
-        let span = self.start_span();
-        let r#async = self.eat(Kind::Async);
-
-        let has_await = self.ctx.has_await();
-        self.ctx = self.ctx.union_await_if(r#async);
-
-        let type_parameters = self.parse_ts_type_parameters()?;
-
-        let params = self.parse_formal_parameters(FormalParameterKind::ArrowFormalParameters)?;
-
-        let return_type = self.parse_ts_return_type_annotation()?;
-
-        self.ctx = self.ctx.and_await(has_await);
-
-        if self.cur_token().is_on_new_line {
-            self.error(diagnostics::LineterminatorBeforeArrow(self.cur_token().span()));
         }
 
-        self.expect(Kind::Arrow)?;
-
-        Ok((type_parameters, params, return_type, r#async, span))
-    }
-
-    /// [ConciseBody](https://tc39.es/ecma262/#prod-ConciseBody)
-    ///     [lookahead ≠ {] `ExpressionBody`[?In, ~Await]
-    ///     { `FunctionBody`[~Yield, ~Await] }
-    /// `ExpressionBody`[In, Await] :
-    ///     `AssignmentExpression`[?In, ~Yield, ?Await]
-    pub(crate) fn parse_arrow_function_body(
-        &mut self,
-        span: Span,
-        type_parameters: Option<Box<'a, TSTypeParameterDeclaration<'a>>>,
-        params: Box<'a, FormalParameters<'a>>,
-        return_type: Option<Box<'a, TSTypeAnnotation<'a>>>,
-        r#async: bool,
-    ) -> Result<Expression<'a>> {
-        let has_await = self.ctx.has_await();
-        let has_yield = self.ctx.has_yield();
-        self.ctx = self.ctx.and_await(r#async).and_yield(false);
-
-        let expression = !self.at(Kind::LCurly);
-        let body = if expression {
-            let expr = self.parse_assignment_expression_base()?;
-            let span = expr.span();
-            let expr_stmt = self.ast.expression_statement(span, expr);
-            self.ast.function_body(span, self.ast.new_vec(), self.ast.new_vec_single(expr_stmt))
-        } else {
-            self.parse_function_body()?
-        };
-
-        self.ctx = self.ctx.and_await(has_await).and_yield(has_yield);
-
-        Ok(self.ast.arrow_expression(
-            self.end_span(span),
-            expression,
-            false,
-            r#async,
-            params,
-            body,
-            type_parameters,
-            return_type,
-        ))
-    }
-
-    /// Section [Arrow Function](https://tc39.es/ecma262/#sec-arrow-function-definitions)
-    /// `ArrowFunction`[In, Yield, Await] :
-    ///     `ArrowParameters`[?Yield, ?Await] [no `LineTerminator` here] => `ConciseBody`[?In]
-    pub(crate) fn parse_parenthesized_arrow_function(&mut self) -> Result<Expression<'a>> {
-        let (type_parameters, params, return_type, r#async, span) =
-            self.parse_parenthesized_arrow_function_head()?;
-        self.parse_arrow_function_body(span, type_parameters, params, return_type, r#async)
+        Ok(id)
     }
 }

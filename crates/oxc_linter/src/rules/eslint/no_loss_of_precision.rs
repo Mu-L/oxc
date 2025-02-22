@@ -1,19 +1,16 @@
-use oxc_ast::ast::NumberLiteral;
-use oxc_ast::AstKind;
-use oxc_diagnostics::{
-    miette::{self, Diagnostic},
-    thiserror::Error,
-};
-use oxc_macros::declare_oxc_lint;
-use oxc_span::Span;
 use std::borrow::Cow;
 
-use crate::{context::LintContext, rule::Rule, AstNode};
+use cow_utils::CowUtils;
+use oxc_ast::{AstKind, ast::NumericLiteral};
+use oxc_diagnostics::OxcDiagnostic;
+use oxc_macros::declare_oxc_lint;
+use oxc_span::Span;
 
-#[derive(Debug, Error, Diagnostic)]
-#[error("eslint(no-loss-of-precision): This number literal will lose precision at runtime.")]
-#[diagnostic(severity(warning))]
-struct NoLossOfPrecisionDiagnostic(#[label] pub Span);
+use crate::{AstNode, context::LintContext, rule::Rule};
+
+fn no_loss_of_precision_diagnostic(span: Span) -> OxcDiagnostic {
+    OxcDiagnostic::warn("This number literal will lose precision at runtime.").with_label(span)
+}
 
 #[derive(Debug, Default, Clone)]
 pub struct NoLossOfPrecision;
@@ -28,20 +25,65 @@ declare_oxc_lint!(
     /// It can lead to unexpected results in certain situations
     /// For example, when performing mathematical operations
     ///
-    /// ### Example
+    /// In JS, Numbers are stored as double-precision floating-point numbers
+    /// according to the IEEE 754 standard. Because of this, numbers can only
+    /// retain accuracy up to a certain amount of digits. If the programmer
+    /// enters additional digits, those digits will be lost in the conversion
+    /// to the Number type and will result in unexpected behavior.
     ///
+    /// ### Examples
+    ///
+    /// Examples of **incorrect** code for this rule:
     /// ```javascript
     /// var x = 2e999;
     /// ```
+    ///
+    /// ```javascript
+    /// var x = 9007199254740993;
+    /// ```
+    ///
+    /// ```javascript
+    /// var x = 5123000000000000000000000000001;
+    /// ```
+    ///
+    /// ```javascript
+    /// var x = 1230000000000000000000000.0;
+    /// ```
+    ///
+    /// ```javascript
+    /// var x = 0X200000_0000000_1;
+    /// ```
+    ///
+    /// Examples of **correct** code for this rule:
+    /// ```javascript
+    /// var x = 12345";
+    /// ```
+    ///
+    /// ```javascript
+    /// var x = 123.456;
+    /// ```
+    ///
+    /// ```javascript
+    /// var x = 123.0000000000000000000000";
+    /// ```
+    ///
+    /// ```javascript
+    /// var x = 123e34;
+    /// ```
+    ///
+    /// ```javascript
+    /// var x = 0x1FFF_FFFF_FFF_FFF;
+    /// ```
     NoLossOfPrecision,
+    eslint,
     correctness
 );
 
 impl Rule for NoLossOfPrecision {
     fn run<'a>(&self, node: &AstNode<'a>, ctx: &LintContext<'a>) {
         match node.kind() {
-            AstKind::NumberLiteral(node) if Self::lose_precision(node) => {
-                ctx.diagnostic(NoLossOfPrecisionDiagnostic(node.span));
+            AstKind::NumericLiteral(node) if Self::lose_precision(node) => {
+                ctx.diagnostic(no_loss_of_precision_diagnostic(node.span));
             }
             _ => {}
         }
@@ -130,7 +172,7 @@ impl<'a> RawNum<'a> {
         let precision = self.frac.len();
         if self.int.starts_with('0') {
             let frac_zeros = self.frac.chars().take_while(|&ch| ch == '0').count();
-            #[allow(clippy::cast_possible_wrap)]
+            #[expect(clippy::cast_possible_wrap)]
             let exp = self.exp - 1 - frac_zeros as isize;
             self.frac = &self.frac[frac_zeros..];
 
@@ -158,7 +200,7 @@ impl<'a> RawNum<'a> {
                 },
             }
         } else {
-            #[allow(clippy::cast_possible_wrap)]
+            #[expect(clippy::cast_possible_wrap)]
             let exp = self.exp + self.int.len() as isize - 1;
             if self.int.len() == 1 {
                 ScientificNotation {
@@ -186,17 +228,10 @@ impl<'a> RawNum<'a> {
 }
 
 impl NoLossOfPrecision {
-    fn get_raw<'a>(node: &'a NumberLiteral) -> Cow<'a, str> {
-        if node.raw.contains('_') {
-            Cow::Owned(node.raw.replace('_', ""))
-        } else {
-            Cow::Borrowed(node.raw)
-        }
-    }
-
-    fn not_base_ten_loses_precision(node: &'_ NumberLiteral) -> bool {
-        let raw = Self::get_raw(node).to_uppercase();
-        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    fn not_base_ten_loses_precision(node: &'_ NumericLiteral) -> bool {
+        let raw = node.raw.as_ref().unwrap().as_str().cow_replace('_', "");
+        let raw = raw.cow_to_ascii_uppercase();
+        #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
         // AST always store number as f64, need a cast to format in bin/oct/hex
         let value = node.value as u64;
         let suffix = if raw.starts_with("0B") {
@@ -206,12 +241,14 @@ impl NoLossOfPrecision {
         } else {
             format!("{value:o}")
         };
-        !raw.ends_with(&suffix.to_uppercase())
+        !raw.ends_with(&suffix.cow_to_ascii_uppercase().as_ref())
     }
 
-    fn base_ten_loses_precision(node: &'_ NumberLiteral) -> bool {
-        let raw = Self::get_raw(node);
-        let Some(raw) = Self::normalize(&raw) else { return true };
+    fn base_ten_loses_precision(node: &'_ NumericLiteral) -> bool {
+        let raw = node.raw.as_ref().unwrap().as_str().cow_replace('_', "");
+        let Some(raw) = Self::normalize(&raw) else {
+            return true;
+        };
 
         if raw.frac.len() >= 100 {
             return true;
@@ -221,7 +258,9 @@ impl NoLossOfPrecision {
             (false, 0) => node.value.to_string(),
             (false, precision) => format!("{:.1$}", node.value, precision),
         };
-        let Some(stored) = Self::normalize(&stored) else { return true };
+        let Some(stored) = Self::normalize(&stored) else {
+            return true;
+        };
         raw != stored
     }
 
@@ -229,7 +268,7 @@ impl NoLossOfPrecision {
         Some(RawNum::new(num)?.normalize())
     }
 
-    pub fn lose_precision(node: &'_ NumberLiteral) -> bool {
+    pub fn lose_precision(node: &'_ NumericLiteral) -> bool {
         if node.base.is_base_10() {
             Self::base_ten_loses_precision(node)
         } else {
@@ -263,7 +302,10 @@ fn test() {
         ("var x = 9007199254740991", None),
         ("var x = 0", None),
         ("var x = 0.0", None),
-        ("var x = 0.000000000000000000000000000000000000000000000000000000000000000000000000000000", None),
+        (
+            "var x = 0.000000000000000000000000000000000000000000000000000000000000000000000000000000",
+            None,
+        ),
         ("var x = -0", None),
         ("var x = 123.0000000000000000000000", None),
         ("var x = 019.5", None),
@@ -327,7 +369,10 @@ fn test() {
         ("var x = -5123000000000000000000000000001", None),
         ("var x = 1230000000000000000000000.0", None),
         ("var x = 1.0000000000000000000000123", None),
-        ("var x = 17498005798264095394980017816940970922825355447145699491406164851279623993595007385788105416184430592", None),
+        (
+            "var x = 17498005798264095394980017816940970922825355447145699491406164851279623993595007385788105416184430592",
+            None,
+        ),
         ("var x = 2e999", None),
         ("var x = .1230000000000000000000000", None),
         ("var x = 0b100000000000000000000000000000000000000000000000000001", None),
@@ -341,7 +386,10 @@ fn test() {
         ("var x = -5_12300000000000000000000_0000001", None),
         ("var x = 123_00000000000000000000_00.0_0", None),
         ("var x = 1.0_00000000000000000_0000123", None),
-        ("var x = 174_980057982_640953949800178169_409709228253554471456994_914061648512796239935950073857881054_1618443059_2", None),
+        (
+            "var x = 174_980057982_640953949800178169_409709228253554471456994_914061648512796239935950073857881054_1618443059_2",
+            None,
+        ),
         ("var x = 2e9_99", None),
         ("var x = .1_23000000000000_00000_0000_0", None),
         ("var x = 0b1_0000000000000000000000000000000000000000000000000000_1", None),
@@ -353,5 +401,5 @@ fn test() {
         ("var x = 1e18_446_744_073_709_551_615", None),
     ];
 
-    Tester::new(NoLossOfPrecision::NAME, pass, fail).test_and_snapshot();
+    Tester::new(NoLossOfPrecision::NAME, NoLossOfPrecision::PLUGIN, pass, fail).test_and_snapshot();
 }

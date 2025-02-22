@@ -1,97 +1,243 @@
 [workspace]
 resolver = "2"
-members  = ["crates/*", "tasks/*", "editor/vscode/server"]
+members = ["apps/*", "crates/*", "napi/*", "tasks/*", "wasm/*"]
+exclude = ["tasks/lint_rules", "tasks/e2e"]
 
 [workspace.package]
-authors      = ["Boshen <boshenc@gmail.com>", "Oxc contributors"]
-categories   = ["development-tools", "web-programming", "compilers"]
-description  = "Oxc is a JavaScript / TypeScript tooling suite."
-edition      = "2021"
-homepage     = "https://github.com/web-infra-dev/oxc"
-keywords     = ["JavaScript", "TypeScript", "parser", "linter", "minifier"]
-license      = "MIT"
-repository   = "https://github.com/web-infra-dev/oxc"
-rust-version = "1.60"
+authors = ["Boshen <boshenc@gmail.com>", "Oxc contributors"]
+categories = ["compilers", "development-tools", "web-programming"]
+homepage = "https://oxc.rs"
+keywords = ["JavaScript", "TypeScript", "linter", "minifier", "parser"]
+license = "MIT"
+repository = "https://github.com/oxc-project/oxc"
+description = "A collection of JavaScript tools written in Rust."
+
+edition = "2024"
+# MSRV Policy N-2 (12 weeks) starting from v1.87.0
+# Balance between the core contributors enjoying the latest version of rustc, while waiting for dependents to catch up.
+rust-version = "1.85.0"
+
+# <https://doc.rust-lang.org/rustc/lints/listing/allowed-by-default.html>
+[workspace.lints.rust]
+absolute_paths_not_starting_with_crate = "warn"
+non_ascii_idents = "warn"
+unit-bindings = "warn"
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(coverage)', 'cfg(coverage_nightly)'] }
+tail_expr_drop_order = "warn"
+unsafe_op_in_unsafe_fn = "allow" # FIXME
+unused_unsafe = "allow"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+empty_docs = { level = "allow", priority = 1 } # From `Tsify`
+# restriction
+dbg_macro = "warn"
+todo = "warn"
+unimplemented = "warn"
+print_stdout = "warn" # Must be opt-in
+print_stderr = "warn" # Must be opt-in
+allow_attributes = "warn"
+# I like the explicitness of this rule as it removes confusion around `clone`.
+# This increases readability, avoids `clone` mindlessly and heap allocating by accident.
+clone_on_ref_ptr = "warn"
+# These two are mutually exclusive, I like `mod.rs` files for better fuzzy searches on module entries.
+self_named_module_files = "warn" # "-Wclippy::mod_module_files"
+empty_drop = "warn"
+empty_structs_with_brackets = "warn"
+exit = "warn"
+filetype_is_file = "warn"
+get_unwrap = "warn"
+rc_buffer = "warn"
+rc_mutex = "warn"
+rest_pat_in_fully_bound_structs = "warn"
+unnecessary_safety_comment = "warn"
+undocumented_unsafe_blocks = "allow" # FIXME
+infinite_loop = "warn"
+map_with_unused_argument_over_ranges = "warn"
+unused_result_ok = "warn"
+pathbuf_init_then_push = "warn"
+# I want to write the best Rust code so pedantic is enabled.
+# We should only disable rules globally if they are either false positives, chaotic, or does not make sense.
+pedantic = { level = "warn", priority = -1 }
+# Allowed rules
+# pedantic
+# All triggers are mostly ignored in our codebase, so this is ignored globally.
+struct_excessive_bools = "allow"
+too_many_lines = "allow"
+# `#[must_use]` is creating too much noise for this codebase, it does not add much value
+# except nagging the programmer to add a `#[must_use]` after clippy has been run.
+# Having `#[must_use]` everywhere also hinders readability.
+must_use_candidate = "allow"
+# Too annoying, we import by name anyway.
+wildcard_imports = "allow"
+# used_underscore_binding= "allow"
+doc_markdown = "allow"
+# nursery
+nursery = { level = "warn", priority = -1 }
+# `const` functions do not make sense for our project because this is not a `const` library.
+# This rule also confuses newcomers and forces them to add `const` blindlessly without any reason.
+missing_const_for_fn = "allow"
+option_if_let_else = "allow"
+or_fun_call = "allow"
+cognitive_complexity = "allow"
+non_send_fields_in_send_ty = "allow"
+use_self = "allow"
+significant_drop_tightening = "allow"
+branches_sharing_code = "allow"
+fallible_impl_from = "allow"
+useless_let_if_seq = "allow"
+impl_trait_in_params = "allow"
+significant_drop_in_scrutinee = "warn"
+iter_on_single_items = "warn"
+unused_peekable = "warn"
+too_long_first_doc_paragraph = "warn"
+suspicious_operation_groupings = "warn"
+redundant_clone = "warn"
+# cargo
+cargo = { level = "warn", priority = -1 }
+multiple_crate_versions = "allow"
+cargo_common_metadata = "allow" # FIXME
+doc_lazy_continuation = "allow" # FIXME
 
 [workspace.dependencies]
 # publish = true
-oxc             = { version = "0.2.0", path = "crates/oxc" }
-oxc_allocator   = { version = "0.2.0", path = "crates/oxc_allocator" }
-oxc_ast         = { version = "0.2.0", path = "crates/oxc_ast" }
-oxc_diagnostics = { version = "0.2.0", path = "crates/oxc_diagnostics" }
-oxc_formatter   = { version = "0.2.0", path = "crates/oxc_formatter" }
-oxc_index       = { version = "0.2.0", path = "crates/oxc_index" }
-oxc_minifier    = { version = "0.2.0", path = "crates/oxc_minifier" }
-oxc_parser      = { version = "0.2.0", path = "crates/oxc_parser" }
-oxc_semantic    = { version = "0.2.0", path = "crates/oxc_semantic" }
-oxc_span        = { version = "0.2.0", path = "crates/oxc_span" }
-oxc_syntax      = { version = "0.2.0", path = "crates/oxc_syntax" }
-oxc_transformer = { version = "0.2.0", path = "crates/oxc_transformer" }
-oxc_codegen     = { version = "0.2.0", path = "crates/oxc_codegen" }
+oxc = { version = "0.52.0", path = "crates/oxc" }
+oxc_allocator = { version = "0.52.0", path = "crates/oxc_allocator" }
+oxc_ast = { version = "0.52.0", path = "crates/oxc_ast" }
+oxc_ast_macros = { version = "0.52.0", path = "crates/oxc_ast_macros" }
+oxc_cfg = { version = "0.52.0", path = "crates/oxc_cfg" }
+oxc_codegen = { version = "0.52.0", path = "crates/oxc_codegen" }
+oxc_data_structures = { version = "0.52.0", path = "crates/oxc_data_structures" }
+oxc_diagnostics = { version = "0.52.0", path = "crates/oxc_diagnostics" }
+oxc_ecmascript = { version = "0.52.0", path = "crates/oxc_ecmascript" }
+oxc_estree = { version = "0.52.0", path = "crates/oxc_estree" }
+oxc_isolated_declarations = { version = "0.52.0", path = "crates/oxc_isolated_declarations" }
+oxc_mangler = { version = "0.52.0", path = "crates/oxc_mangler" }
+oxc_minifier = { version = "0.52.0", path = "crates/oxc_minifier" }
+oxc_napi = { version = "0.52.0", path = "crates/oxc_napi" }
+oxc_parser = { version = "0.52.0", path = "crates/oxc_parser" }
+oxc_parser_napi = { version = "0.52.0", path = "napi/parser" }
+oxc_regular_expression = { version = "0.52.0", path = "crates/oxc_regular_expression" }
+oxc_semantic = { version = "0.52.0", path = "crates/oxc_semantic" }
+oxc_span = { version = "0.52.0", path = "crates/oxc_span" }
+oxc_syntax = { version = "0.52.0", path = "crates/oxc_syntax" }
+oxc_transform_napi = { version = "0.52.0", path = "napi/transform" }
+oxc_transformer = { version = "0.52.0", path = "crates/oxc_transformer" }
+oxc_traverse = { version = "0.52.0", path = "crates/oxc_traverse" }
 
 # publish = false
-oxc_macros         = { path = "crates/oxc_macros" }
-oxc_linter         = { path = "crates/oxc_linter" }
-oxc_type_synthesis = { path = "crates/oxc_type_synthesis" }
-oxc_query          = { path = "crates/oxc_query" }
-oxc_linter_plugin  = { path = "crates/oxc_linter_plugin" }
-
-# published by its own
-oxc_resolver = { path = "crates/oxc_resolver" }
-
+oxc_linter = { path = "crates/oxc_linter" }
+oxc_macros = { path = "crates/oxc_macros" }
+oxc_prettier = { path = "crates/oxc_prettier" }
 oxc_tasks_common = { path = "tasks/common" }
-oxc_vscode       = { path = "editor/vscode/server" }
+oxc_tasks_transform_checker = { path = "tasks/transform_checker" }
 
-bpaf                      = { version = "0.9.5" }
-bitflags                  = { version = "2.4.1" }
-bumpalo                   = { version = "3.14.0" }
-compact_str               = { version = "0.7.1" }
-convert_case              = { version = "0.6.0" }
-criterion                 = { version = "0.5.1", default-features = false }
-crossbeam-channel         = { version = "0.5.8" }
-dashmap                   = { version = "5.5.3" }
-env_logger                = { version = "0.10.0", default-features = false, features = ["auto-color", "humantime"] }
-flate2                    = { version = "1.0.28" }
-futures                   = { version = "0.3.29" }
-ignore                    = { version = "0.4.20" }
-itertools                 = { version = "0.11.0" }
-jemallocator              = { version = "0.5.4" }
-lazy_static               = { version = "1.4.0" }
-miette                    = { version = "5.10.0", features = ["fancy-no-backtrace"] }
-mimalloc                  = { version = "0.1.39" }
-nodejs-resolver           = { version = "0.1.0" }
-num-bigint                = { version = "0.4.4" }
-num-traits                = { version = "0.2.17" }
-phf                       = { version = "0.11" }
-pico-args                 = { version = "0.5.0" }
-proc-macro2               = { version = "1.0.69" }
-project-root              = { version = "0.2.2" }
-quote                     = { version = "1.0.33" }
-rayon                     = { version = "1.8.0" }
-regex                     = { version = "1.10.2" }
-rustc-hash                = { version = "1.1.0", default-features = false, features = ["std"] }
-ryu-js                    = { version = "0.2.2" }
-ropey                     = { version = "1.6.1" }
-serde                     = { version = "1.0.190" }
-serde_json                = { version = "1.0.107" }
-syn                       = { version = "=1" }
-thiserror                 = { version = "1.0.50" }
-tokio                     = { version = "1" }
-tower-lsp                 = { version = "0.20.0", features = ["proposed"] }
-unicode-id-start          = { version = "1.1.2" }
-ureq                      = { version = "2.8.0", default-features = false, features = ["tls"] }
-url                       = { version = "2.4.1" }
-walkdir                   = { version = "2.4.0" }
-indexmap                  = { version = "2.0.2" }
-index_vec                 = { version = "0.1.3" }
-static_assertions         = { version = "1.1.0" }
-stacker                   = { version = "0.1.15" }
-tracing                   = { version = "0.1" }
-tracing-subscriber        = { version = "0.3" }
-trustfall                 = { version = "0.6.1" }
-insta                     = { version = "1.34.0", features = ["glob"] }
-codspeed-criterion-compat = { version = "2.3.1", default-features = false }
-glob                      = { version = "0.3.1" }
+# Relaxed version so the user can decide which version to use.
+napi = "3.0.0-alpha"
+napi-build = "2"
+napi-derive = "3.0.0-alpha"
+
+# Relaxed version so the user can decide which version to use.
+indexmap = "2"
+proc-macro2 = "1"
+quote = "1"
+rustc-hash = "2"
+serde = "1"
+serde_json = "1"
+syn = { version = "2", default-features = false }
+unicode-id-start = "1"
+
+#
+oxc-browserslist = "1.1.2"
+oxc_index = "2"
+oxc_resolver = "4"
+oxc_sourcemap = "1"
+
+#
+allocator-api2 = "0.2.21"
+assert-unchecked = "0.1.2"
+base64 = "0.22.1"
+bitflags = "2.8.0"
+bpaf = "0.9.16"
+bumpalo = "3.17.0"
+compact_str = "0.8.1"
+console = "0.15.10"
+console_error_panic_hook = "0.1.7"
+convert_case = "0.7.1"
+cow-utils = "0.1.3"
+criterion2 = { version = "2.0.0", default-features = false }
+encoding_rs = "0.8.35"
+encoding_rs_io = "0.1.7"
+env_logger = { version = "0.11.6", default-features = false }
+fast-glob = "0.4.3"
+fixedbitset = "0.5.7"
+flate2 = "1.0.35"
+futures = "0.3.31"
+globset = "0.4.15"
+handlebars = "6.3.1"
+hashbrown = { version = "0.15.2", default-features = false }
+humansize = "2.1.3"
+ignore = "0.4.23"
+insta = "1.42.1"
+itertools = "0.14.0"
+itoa = "1.0.14"
+jemallocator = "0.5.4"
+json-strip-comments = "1.0.4"
+language-tags = "0.3.2"
+lazy_static = "1.5.0"
+log = "0.4.25"
+markdown = "1.0.0-alpha.22"
+memchr = "2.7.4"
+miette = { package = "oxc-miette", version = "1.0.2", features = ["fancy-no-syscall"] }
+mimalloc = "0.1.43"
+nonmax = "0.5.5"
+num-bigint = "0.4.6"
+num-traits = "0.2.19"
+papaya = "0.2.0"
+petgraph = "0.7.1"
+phf = "0.11.3"
+pico-args = "0.5.0"
+prettyplease = "0.2.29"
+project-root = "0.2.2"
+rayon = "1.10.0"
+regex = "1.11.1"
+ropey = "1.6.1"
+rust-lapper = "1.1.0"
+ryu-js = "1.0.1"
+saphyr = "0.0.3"
+schemars = "0.8.21"
+self_cell = "1.1.0"
+seq-macro = "0.3.5"
+serde-wasm-bindgen = "0.6.5"
+sha1 = "0.10.6"
+simdutf8 = { version = "0.1.5", features = ["aarch64_neon"] }
+similar = "2.7.0"
+similar-asserts = "1.6.1"
+tempfile = "3.16.0"
+tokio = "1.43.0"
+tower-lsp = "0.20.0"
+tracing-subscriber = "0.3.19"
+tsify = "0.4.5"
+ureq = { version = "3.0.5", default-features = false }
+walkdir = "2.5.0"
+wasm-bindgen = "0.2.100"
+
+[workspace.metadata.cargo-shear]
+ignored = ["napi", "oxc_transform_napi", "oxc_parser_napi", "prettyplease"]
+
+[profile.dev]
+# Disabling debug info speeds up local and CI builds,
+# and we don't rely on it for debugging that much.
+debug = false
+
+[profile.dev.package]
+# Compile macros with some optimizations to make consuming crates build faster
+oxc_macros.opt-level = 1
+oxc_ast_macros.opt-level = 1
+# Compile insta and its dependencies in release mode for faster snapshot tests
+# See: https://insta.rs/docs/quickstart/#optional-faster-runs
+insta.opt-level = 3
+similar.opt-level = 3
 
 [profile.release.package.oxc_wasm]
 opt-level = 'z'
@@ -99,16 +245,32 @@ opt-level = 'z'
 [profile.release]
 # Configurations explicitly listed here for clarity.
 # Using the best options for performance.
-opt-level     = 3
-lto           = "fat"
+opt-level = 3
+lto = "fat"
 codegen-units = 1
-strip         = "symbols"
-debug         = false
-panic         = "abort"   # Let it crash and force ourselves to write safe Rust.
+strip = "symbols" # Set to `false` for debug information
+debug = false # Set to `true` for debug information
+panic = "abort" # Let it crash and force ourselves to write safe Rust
 
-# Use the `--profile release-debug` flag to show symbols in release mode.
-# e.g. `cargo build --profile release-debug`
-[profile.release-debug]
+# Profile used for release mode, but with debugging information for profiling
+# and debugging. Use `cargo build --profile=release-with-debug` to build with this profile.
+[profile.release-with-debug]
 inherits = "release"
-strip    = false
-debug    = true
+strip = false # Keep debug information in binary
+debug = true # Include maximum amount of debug information
+
+# Profile for `cargo coverage`
+[profile.coverage]
+inherits = "release"
+opt-level = 2 # Compile faster
+codegen-units = 256 # Compile faster
+lto = "thin" # Faster compile time with thin LTO
+debug-assertions = true # Make sure `debug_assert!`s pass
+overflow-checks = true # Catch arithmetic overflow errors
+
+# Profile for linting with release mode-like settings.
+# Catches lint errors which only appear in release mode.
+# `cargo lint --profile dev-no-debug-assertions` is about 35% faster than `cargo lint --release`.
+[profile.dev-no-debug-assertions]
+inherits = "dev"
+debug-assertions = false

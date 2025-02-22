@@ -1,25 +1,20 @@
 use oxc_ast::{
-    ast::{
-        AssignmentExpression, AssignmentTarget, CallExpression, Expression, MemberExpression,
-        SimpleAssignmentTarget,
-    },
     AstKind,
+    ast::{
+        AssignmentExpression, CallExpression, Expression, MemberExpression, SimpleAssignmentTarget,
+    },
 };
-use oxc_diagnostics::{
-    miette::{self, Diagnostic},
-    thiserror::Error,
-};
+use oxc_diagnostics::OxcDiagnostic;
 use oxc_macros::declare_oxc_lint;
 use oxc_span::{GetSpan, Span};
 
-use crate::{context::LintContext, rule::Rule, Fix};
+use crate::{context::LintContext, rule::Rule};
 
-#[derive(Debug, Error, Diagnostic)]
-#[error("eslint-plugin-jest(no-jasmine-globals): {0:?}")]
-#[diagnostic(severity(warning), help("{1:?}"))]
-struct NoJasmineGlobalsDiagnostic(pub &'static str, pub &'static str, #[label] pub Span);
+fn no_jasmine_globals_diagnostic(x0: &str, x1: &str, span2: Span) -> OxcDiagnostic {
+    OxcDiagnostic::warn(format!("{x0:?}")).with_help(format!("{x1:?}")).with_label(span2)
+}
 
-/// <https://github.com/jest-community/eslint-plugin-jest/blob/main/docs/rules/no-jasmine-globals.md>
+/// <https://github.com/jest-community/eslint-plugin-jest/blob/v28.9.0/docs/rules/no-jasmine-globals.md>
 #[derive(Debug, Default, Clone)]
 pub struct NoJasmineGlobals;
 
@@ -39,7 +34,9 @@ declare_oxc_lint!(
     /// });
     /// ```
     NoJasmineGlobals,
-    restriction
+    jest,
+    style,
+    conditional_fix
 );
 
 const NON_JASMINE_PROPERTY_NAMES: [&str; 4] = ["spyOn", "spyOnProperty", "fail", "pending"];
@@ -53,13 +50,17 @@ impl Rule for NoJasmineGlobals {
             .scopes()
             .root_unresolved_references()
             .iter()
-            .filter(|(key, _)| NON_JASMINE_PROPERTY_NAMES.contains(&key.as_str()));
+            .filter(|(key, _)| NON_JASMINE_PROPERTY_NAMES.contains(key));
 
         for (name, reference_ids) in jasmine_references {
             for &reference_id in reference_ids {
                 let reference = symbol_table.get_reference(reference_id);
                 if let Some((error, help)) = get_non_jasmine_property_messages(name) {
-                    ctx.diagnostic(NoJasmineGlobalsDiagnostic(error, help, reference.span()));
+                    ctx.diagnostic(no_jasmine_globals_diagnostic(
+                        error,
+                        help,
+                        ctx.semantic().reference_span(reference),
+                    ));
                 }
             }
         }
@@ -75,43 +76,42 @@ impl Rule for NoJasmineGlobals {
 }
 
 fn diagnostic_assign_expr<'a>(expr: &'a AssignmentExpression<'a>, ctx: &LintContext) {
-    if let AssignmentTarget::SimpleAssignmentTarget(
-        SimpleAssignmentTarget::MemberAssignmentTarget(member_expr),
-    ) = &expr.left
+    if let Some(member_expr) = expr
+        .left
+        .as_simple_assignment_target()
+        .and_then(SimpleAssignmentTarget::as_member_expression)
     {
-        let (span, property_name) = match get_jasmine_property_name(member_expr) {
-            Some(value) => value,
-            None => return,
+        let Some((span, property_name)) = get_jasmine_property_name(member_expr) else {
+            return;
         };
 
         if property_name == "DEFAULT_TIMEOUT_INTERVAL" {
             // `jasmine.DEFAULT_TIMEOUT_INTERVAL = 5000` we can fix it to `jest.setTimeout(5000)`
-            if let Expression::NumberLiteral(number_literal) = &expr.right {
+            if let Expression::NumericLiteral(number_literal) = &expr.right {
                 ctx.diagnostic_with_fix(
-                    NoJasmineGlobalsDiagnostic(COMMON_ERROR_TEXT, COMMON_HELP_TEXT, span),
-                    || {
+                    no_jasmine_globals_diagnostic(COMMON_ERROR_TEXT, COMMON_HELP_TEXT, span),
+                    |fixer| {
                         let content = format!("jest.setTimeout({})", number_literal.value);
-                        Fix::new(content, expr.span)
+                        fixer.replace(expr.span, content)
                     },
                 );
                 return;
             }
         }
 
-        ctx.diagnostic(NoJasmineGlobalsDiagnostic(COMMON_ERROR_TEXT, COMMON_HELP_TEXT, span));
+        ctx.diagnostic(no_jasmine_globals_diagnostic(COMMON_ERROR_TEXT, COMMON_HELP_TEXT, span));
     }
 }
 
 fn diagnostic_call_expr<'a>(expr: &'a CallExpression<'a>, ctx: &LintContext) {
-    if let Expression::MemberExpression(member_expr) = &expr.callee {
-        let (span, property_name) = match get_jasmine_property_name(member_expr) {
-            Some(value) => value,
-            None => return,
+    if let Some(member_expr) = expr.callee.as_member_expression() {
+        let Some((span, property_name)) = get_jasmine_property_name(member_expr) else {
+            return;
         };
 
         JasmineProperty::from_str(property_name).map_or_else(
             || {
-                ctx.diagnostic(NoJasmineGlobalsDiagnostic(
+                ctx.diagnostic(no_jasmine_globals_diagnostic(
                     COMMON_ERROR_TEXT,
                     COMMON_HELP_TEXT,
                     span,
@@ -120,11 +120,12 @@ fn diagnostic_call_expr<'a>(expr: &'a CallExpression<'a>, ctx: &LintContext) {
             |jasmine_property| {
                 let (error, help) = jasmine_property.details();
                 if jasmine_property.available_in_jest_expect() {
-                    ctx.diagnostic_with_fix(NoJasmineGlobalsDiagnostic(error, help, span), || {
-                        Fix::new("expect", member_expr.object().span())
-                    });
+                    ctx.diagnostic_with_fix(
+                        no_jasmine_globals_diagnostic(error, help, span),
+                        |fixer| fixer.replace(member_expr.object().span(), "expect"),
+                    );
                 } else {
-                    ctx.diagnostic(NoJasmineGlobalsDiagnostic(error, help, span));
+                    ctx.diagnostic(no_jasmine_globals_diagnostic(error, help, span));
                 }
             },
         );
@@ -140,9 +141,7 @@ fn get_jasmine_property_name<'a>(member_expr: &'a MemberExpression<'a>) -> Optio
     if !is_jasmine_object {
         return None;
     }
-    let Some((span, property_name)) = member_expr.static_property_info() else {
-        return None;
-    };
+    let (span, property_name) = member_expr.static_property_info()?;
     Some((span, property_name))
 }
 
@@ -187,6 +186,7 @@ impl JasmineProperty {
             _ => None,
         }
     }
+
     fn details(&self) -> (&'static str, &'static str) {
         match self {
             Self::Any => ("Illegal usage of `any`", "prefer use Jest own API `expect.any`"),
@@ -213,6 +213,7 @@ impl JasmineProperty {
             }
         }
     }
+
     fn available_in_jest_expect(&self) -> bool {
         matches!(
             self,
@@ -293,5 +294,8 @@ fn test() {
         ),
     ];
 
-    Tester::new(NoJasmineGlobals::NAME, pass, fail).expect_fix(fix).test_and_snapshot();
+    Tester::new(NoJasmineGlobals::NAME, NoJasmineGlobals::PLUGIN, pass, fail)
+        .with_jest_plugin(true)
+        .expect_fix(fix)
+        .test_and_snapshot();
 }

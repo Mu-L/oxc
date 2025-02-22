@@ -1,42 +1,29 @@
 use oxc_ast::{
-    ast::{BindingIdentifier, BindingPatternKind},
     AstKind,
+    ast::{BindingIdentifier, BindingPatternKind},
 };
-use oxc_diagnostics::{
-    miette::{self, Diagnostic},
-    thiserror::{self, Error},
-};
+use oxc_diagnostics::OxcDiagnostic;
 use oxc_macros::declare_oxc_lint;
-use oxc_semantic::VariableInfo;
-use oxc_span::{Atom, Span};
+use oxc_span::Span;
+use oxc_syntax::symbol::SymbolId;
 
-use crate::{context::LintContext, globals::BUILTINS, rule::Rule};
+use crate::{context::LintContext, rule::Rule};
 
-#[derive(Debug, Error, Diagnostic)]
-#[error("eslint(no-redeclare): '{0}' is already defined.")]
-#[diagnostic(severity(warning))]
-struct NoRedeclareDiagnostic(
-    Atom,
-    #[label("'{0}' is already defined.")] pub Span,
-    #[label("It can not be redeclare here.")] pub Span,
-);
+fn no_redeclare_diagnostic(id_name: &str, decl_span: Span, re_decl_span: Span) -> OxcDiagnostic {
+    OxcDiagnostic::warn(format!("'{id_name}' is already defined.")).with_labels([
+        decl_span.label(format!("'{id_name}' is already defined.")),
+        re_decl_span.label("It can not be redeclare here."),
+    ])
+}
 
-#[derive(Debug, Error, Diagnostic)]
-#[error("eslint(no-redeclare): '{0}' is already defined as a built-in global variable.")]
-#[diagnostic(severity(warning))]
-struct NoRedeclareAsBuiltiInDiagnostic(
-    Atom,
-    #[label("'{0}' is already defined as a built-in global variable.")] pub Span,
-);
-
-#[derive(Debug, Error, Diagnostic)]
-#[error("eslint(no-redeclare): '{0}' is already defined by a variable declaration.")]
-#[diagnostic(severity(warning))]
-struct NoRedeclareBySyntaxDiagnostic(
-    Atom,
-    #[label("'{0}' is already defined by a variable declaration.")] pub Span,
-    #[label("It can not be redeclare here.")] pub Span,
-);
+fn no_redeclare_as_builtin_in_diagnostic(builtin_name: &str, span: Span) -> OxcDiagnostic {
+    OxcDiagnostic::warn(format!(
+        "'{builtin_name}' is already defined as a built-in global variable."
+    ))
+    .with_label(
+        span.label(format!("'{builtin_name}' is already defined as a built-in global variable.")),
+    )
+}
 
 #[derive(Debug, Default, Clone)]
 pub struct NoRedeclare {
@@ -58,7 +45,8 @@ declare_oxc_lint!(
     /// var a = 10;
     /// ```
     NoRedeclare,
-    nursery // There are false positives within TypeScript files (e.g. redeclare on interface)
+    eslint,
+    pedantic
 );
 
 impl Rule for NoRedeclare {
@@ -72,42 +60,41 @@ impl Rule for NoRedeclare {
         Self { built_in_globals }
     }
 
-    fn run_once(&self, ctx: &LintContext) {
-        let redeclare_variables = ctx.semantic().redeclare_variables();
+    fn run_on_symbol(&self, symbol_id: SymbolId, ctx: &LintContext) {
         let symbol_table = ctx.semantic().symbols();
-
-        for variable in redeclare_variables {
-            let decl = symbol_table.get_declaration(variable.symbol_id);
-            match ctx.nodes().kind(decl) {
-                AstKind::VariableDeclarator(var) => {
-                    if let BindingPatternKind::BindingIdentifier(ident) = &var.id.kind {
-                        self.report_diagnostic(ctx, variable, ident);
-                    }
-                }
-                AstKind::FormalParameters(params) => {
-                    for item in &params.items {
-                        if let BindingPatternKind::BindingIdentifier(ident) = &item.pattern.kind {
-                            self.report_diagnostic(ctx, variable, ident);
+        let decl_node_id = symbol_table.get_declaration(symbol_id);
+        match ctx.nodes().kind(decl_node_id) {
+            AstKind::VariableDeclarator(var) => {
+                if let BindingPatternKind::BindingIdentifier(ident) = &var.id.kind {
+                    let symbol_name = symbol_table.get_name(symbol_id);
+                    if symbol_name == ident.name.as_str() {
+                        for span in ctx.symbols().get_redeclarations(symbol_id) {
+                            self.report_diagnostic(ctx, *span, ident);
                         }
                     }
                 }
-                _ => {}
             }
+            AstKind::FormalParameter(param) => {
+                if let BindingPatternKind::BindingIdentifier(ident) = &param.pattern.kind {
+                    let symbol_name = symbol_table.get_name(symbol_id);
+                    if symbol_name == ident.name.as_str() {
+                        for span in ctx.symbols().get_redeclarations(symbol_id) {
+                            self.report_diagnostic(ctx, *span, ident);
+                        }
+                    }
+                }
+            }
+            _ => {}
         }
     }
 }
 
 impl NoRedeclare {
-    fn report_diagnostic(
-        &self,
-        ctx: &LintContext,
-        variable: &VariableInfo,
-        ident: &BindingIdentifier,
-    ) {
-        if self.built_in_globals && BUILTINS.get(&ident.name).is_some() {
-            ctx.diagnostic(NoRedeclareAsBuiltiInDiagnostic(ident.name.clone(), ident.span));
-        } else if variable.name == ident.name && variable.span != ident.span {
-            ctx.diagnostic(NoRedeclareDiagnostic(ident.name.clone(), ident.span, variable.span));
+    fn report_diagnostic(&self, ctx: &LintContext, span: Span, ident: &BindingIdentifier) {
+        if self.built_in_globals && ctx.env_contains_var(&ident.name) {
+            ctx.diagnostic(no_redeclare_as_builtin_in_diagnostic(ident.name.as_str(), ident.span));
+        } else {
+            ctx.diagnostic(no_redeclare_diagnostic(ident.name.as_str(), ident.span, span));
         }
     }
 }
@@ -153,12 +140,10 @@ fn test() {
         ("var a = 3; var a = 10; var a = 15;", None),
         ("var a; var a;", None),
         ("export var a; var a;", None),
-        // `var` redeclaration in class static blocks. Redeclaration of functions is not allowed in class static blocks.
         ("class C { static { var a; var a; } }", None),
-        // Todo: Fix me
-        // ("class C { static { var a; { var a; } } }", None),
-        // ("class C { static { { var a; } var a; } }", None),
-        // ("class C { static { { var a; } { var a; } } }", None),
+        ("class C { static { var a; { var a; } } }", None),
+        ("class C { static { { var a; } var a; } }", None),
+        ("class C { static { { var a; } { var a; } } }", None),
         // ("var Object = 0;", Some(serde_json::json!([{ "builtinGlobals": true }]))),
         (
             "var a; var {a = 0, b: Object = 0} = {};",
@@ -171,9 +156,9 @@ fn test() {
         ),
         ("function f() { var a; var a; }", None),
         ("function f(a) { var a; }", None),
-        // ("function f() { var a; if (test) { var a; } }", None),
+        ("function f() { var a; if (test) { var a; } }", None),
         ("for (var a, a;;);", None),
     ];
 
-    Tester::new(NoRedeclare::NAME, pass, fail).test_and_snapshot();
+    Tester::new(NoRedeclare::NAME, NoRedeclare::PLUGIN, pass, fail).test_and_snapshot();
 }

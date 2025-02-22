@@ -1,23 +1,22 @@
 use oxc_ast::{
-    ast::{ModifierKind, TSModuleDeclarationName},
     AstKind,
+    ast::{TSModuleDeclarationKind, TSModuleDeclarationName},
 };
-use oxc_diagnostics::{
-    miette::{self, Diagnostic},
-    thiserror::Error,
-};
+use oxc_diagnostics::OxcDiagnostic;
 use oxc_macros::declare_oxc_lint;
 use oxc_span::Span;
 
-use crate::{context::LintContext, rule::Rule, AstNode};
+use crate::{
+    AstNode,
+    context::{ContextHost, LintContext},
+    rule::Rule,
+};
 
-#[derive(Debug, Error, Diagnostic)]
-#[error("typescript-eslint(no-namespace): ES2015 module syntax is preferred over namespaces.")]
-#[diagnostic(
-    severity(warning),
-    help("Replace the namespace with an ES2015 module or use `declare module`")
-)]
-struct NoNamespaceDiagnostic(#[label] pub Span);
+fn no_namespace_diagnostic(span: Span) -> OxcDiagnostic {
+    OxcDiagnostic::warn("ES2015 module syntax is preferred over namespaces.")
+        .with_help("Replace the namespace with an ES2015 module or use `declare module`")
+        .with_label(span)
+}
 
 #[derive(Debug, Default, Clone)]
 pub struct NoNamespace {
@@ -42,7 +41,8 @@ declare_oxc_lint!(
     /// declare namespace foo {}
     /// ```
     NoNamespace,
-    correctness
+    typescript,
+    restriction
 );
 
 impl Rule for NoNamespace {
@@ -61,9 +61,14 @@ impl Rule for NoNamespace {
         }
     }
 
+    #[expect(clippy::cast_possible_truncation)]
     fn run<'a>(&self, node: &AstNode<'a>, ctx: &LintContext<'a>) {
-        let AstKind::TSModuleDeclaration(declaration) = node.kind() else { return };
-        let TSModuleDeclarationName::Identifier(ident) = &declaration.id else { return };
+        let AstKind::TSModuleDeclaration(declaration) = node.kind() else {
+            return;
+        };
+        let TSModuleDeclarationName::Identifier(ident) = &declaration.id else {
+            return;
+        };
 
         if ident.name == "global" {
             return;
@@ -79,26 +84,36 @@ impl Rule for NoNamespace {
             return;
         }
 
-        if self.allow_definition_files && ctx.source_type().is_typescript_definition() {
-            return;
-        }
+        let declaration_code = declaration.span.source_text(ctx.source_text());
 
-        let start = declaration.span.start;
-        let span = Span::new(start, declaration.span.start + 6); // "module".len()
-        let modifier = span.source_text(ctx.source_text());
-        let span = if modifier == "module" {
-            span
-        } else {
-            Span::new(start, declaration.span.start + 9) // "namespace".len()
+        let span = match declaration.kind {
+            TSModuleDeclarationKind::Global => None, // handled above
+            TSModuleDeclarationKind::Module => declaration_code.find("module").map(|i| {
+                Span::new(declaration.span.start + i as u32, declaration.span.start + i as u32 + 6)
+            }),
+            TSModuleDeclarationKind::Namespace => declaration_code.find("namespace").map(|i| {
+                Span::new(declaration.span.start + i as u32, declaration.span.start + i as u32 + 9)
+            }),
         };
-        ctx.diagnostic(NoNamespaceDiagnostic(span));
+        if let Some(span) = span {
+            ctx.diagnostic(no_namespace_diagnostic(span));
+        }
+    }
+
+    fn should_run(&self, ctx: &ContextHost) -> bool {
+        if self.allow_definition_files && ctx.source_type().is_typescript_definition() {
+            return false;
+        }
+        ctx.source_type().is_typescript()
     }
 }
 
 fn is_declaration(node: &AstNode, ctx: &LintContext) -> bool {
-    ctx.nodes().iter_parents(node.id()).any(|node| {
-        let AstKind::TSModuleDeclaration(declaration) = node.kind() else { return false };
-        declaration.modifiers.contains(ModifierKind::Declare)
+    ctx.nodes().ancestors(node.id()).any(|node| {
+        let AstKind::TSModuleDeclaration(declaration) = node.kind() else {
+            return false;
+        };
+        declaration.declare
     })
 }
 
@@ -343,5 +358,5 @@ fn test() {
         ),
     ];
 
-    Tester::new(NoNamespace::NAME, pass, fail).test_and_snapshot();
+    Tester::new(NoNamespace::NAME, NoNamespace::PLUGIN, pass, fail).test_and_snapshot();
 }

@@ -1,238 +1,214 @@
 //! Literals
 
-use std::{
-    fmt,
-    hash::{Hash, Hasher},
-};
+// NB: `#[span]`, `#[scope(...)]`,`#[visit(...)]` and `#[generate_derive(...)]` do NOT do anything to the code.
+// They are purely markers for codegen used in `tasks/ast_tools` and `crates/oxc_traverse/scripts`. See docs in those crates.
+// Read [`macro@oxc_ast_macros::ast`] for more information.
+
+use std::hash::Hash;
 
 use bitflags::bitflags;
-use num_bigint::BigInt;
-use oxc_span::{Atom, Span};
-use oxc_syntax::NumberBase;
-#[cfg(feature = "serde")]
-use serde::Serialize;
+use oxc_allocator::{Box, CloneIn};
+use oxc_ast_macros::ast;
+use oxc_estree::ESTree;
+use oxc_regular_expression::ast::Pattern;
+use oxc_span::{Atom, ContentEq, GetSpan, GetSpanMut, Span};
+use oxc_syntax::number::{BigintBase, NumberBase};
 
-#[derive(Debug, Clone, Hash)]
-#[cfg_attr(feature = "serde", derive(Serialize), serde(tag = "type"))]
+/// Boolean literal
+///
+/// <https://tc39.es/ecma262/#prod-BooleanLiteral>
+#[ast(visit)]
+#[derive(Debug, Clone)]
+#[generate_derive(CloneIn, GetSpan, GetSpanMut, ContentEq, ESTree)]
+#[estree(rename = "Literal", add_fields(raw = BooleanLiteralRaw))]
 pub struct BooleanLiteral {
-    #[cfg_attr(feature = "serde", serde(flatten))]
+    /// Node location in source code
     pub span: Span,
+    /// The boolean value itself
     pub value: bool,
 }
 
-impl BooleanLiteral {
-    pub fn new(span: Span, value: bool) -> Self {
-        Self { span, value }
-    }
-
-    pub fn as_str(&self) -> &'static str {
-        if self.value {
-            "true"
-        } else {
-            "false"
-        }
-    }
-}
-
+/// Null literal
+///
+/// <https://tc39.es/ecma262/#sec-null-literals>
+#[ast(visit)]
 #[derive(Debug, Clone)]
-#[cfg_attr(feature = "serde", derive(Serialize), serde(tag = "type"))]
+#[generate_derive(CloneIn, GetSpan, GetSpanMut, ContentEq, ESTree)]
+#[estree(rename = "Literal", add_fields(value = Null, raw = NullLiteralRaw))]
 pub struct NullLiteral {
-    #[cfg_attr(feature = "serde", serde(flatten))]
+    /// Node location in source code
     pub span: Span,
 }
 
-impl Hash for NullLiteral {
-    fn hash<H: Hasher>(&self, state: &mut H) {
-        None::<bool>.hash(state);
-    }
-}
-
-impl NullLiteral {
-    pub fn new(span: Span) -> Self {
-        Self { span }
-    }
-}
-
+/// Numeric literal
+///
+/// <https://tc39.es/ecma262/#sec-literals-numeric-literals>
+#[ast(visit)]
 #[derive(Debug, Clone)]
-#[cfg_attr(feature = "serde", derive(Serialize), serde(tag = "type"))]
-pub struct NumberLiteral<'a> {
-    #[cfg_attr(feature = "serde", serde(flatten))]
+#[generate_derive(CloneIn, ContentEq, GetSpan, GetSpanMut, ESTree)]
+#[estree(rename = "Literal")]
+pub struct NumericLiteral<'a> {
+    /// Node location in source code
     pub span: Span,
+    /// The value of the number, converted into base 10
     pub value: f64,
-    #[cfg_attr(feature = "serde", serde(skip))]
-    pub raw: &'a str,
-    #[cfg_attr(feature = "serde", serde(skip))]
+    /// The number as it appears in source code
+    ///
+    /// `None` when this ast node is not constructed from the parser.
+    #[content_eq(skip)]
+    pub raw: Option<Atom<'a>>,
+    /// The base representation used by the literal in source code
+    #[content_eq(skip)]
+    #[estree(skip)]
     pub base: NumberBase,
 }
 
-impl<'a> NumberLiteral<'a> {
-    pub fn new(span: Span, value: f64, raw: &'a str, base: NumberBase) -> Self {
-        Self { span, value, raw, base }
-    }
-
-    /// port from [closure compiler](https://github.com/google/closure-compiler/blob/a4c880032fba961f7a6c06ef99daa3641810bfdd/src/com/google/javascript/jscomp/base/JSCompDoubles.java#L113)
-    /// <https://262.ecma-international.org/5.1/#sec-9.5>
-    #[allow(clippy::cast_possible_truncation)] // for `as i32`
-    pub fn ecmascript_to_int32(num: f64) -> i32 {
-        // Fast path for most common case. Also covers -0.0
-        let int32_value = num as i32;
-        if (f64::from(int32_value) - num).abs() < f64::EPSILON {
-            return int32_value;
-        }
-
-        // NaN, Infinity if not included in our NumberLiteral, so we just skip step 2.
-
-        // step 3
-        let pos_int = num.signum() * num.abs().floor();
-
-        // step 4
-        let int32bit = pos_int % 2f64.powi(32);
-
-        // step5
-        if int32bit >= 2f64.powi(31) {
-            (int32bit - 2f64.powi(32)) as i32
-        } else {
-            int32bit as i32
-        }
-    }
-}
-
-impl<'a> Hash for NumberLiteral<'a> {
-    fn hash<H: Hasher>(&self, state: &mut H) {
-        self.base.hash(state);
-        self.raw.hash(state);
-    }
-}
-
-#[derive(Debug, Clone, Hash)]
-#[cfg_attr(feature = "serde", derive(Serialize), serde(tag = "type"))]
-pub struct BigintLiteral {
-    #[cfg_attr(feature = "serde", serde(flatten))]
+/// String literal
+///
+/// <https://tc39.es/ecma262/#sec-literals-string-literals>
+#[ast(visit)]
+#[derive(Debug, Clone)]
+#[generate_derive(CloneIn, ContentEq, GetSpan, GetSpanMut, ESTree)]
+#[estree(rename = "Literal")]
+pub struct StringLiteral<'a> {
+    /// Node location in source code
     pub span: Span,
-    #[cfg_attr(feature = "serde", serde(serialize_with = "crate::serialize::serialize_bigint"))]
-    pub value: BigInt,
+    /// The value of the string.
+    ///
+    /// Any escape sequences in the raw code are unescaped.
+    pub value: Atom<'a>,
+
+    /// The raw string as it appears in source code.
+    ///
+    /// `None` when this ast node is not constructed from the parser.
+    #[content_eq(skip)]
+    pub raw: Option<Atom<'a>>,
 }
 
-#[derive(Debug, Clone, Hash)]
-#[cfg_attr(feature = "serde", derive(Serialize), serde(tag = "type"))]
-pub struct RegExpLiteral {
-    #[cfg_attr(feature = "serde", serde(flatten))]
+/// BigInt literal
+#[ast(visit)]
+#[derive(Debug, Clone)]
+#[generate_derive(CloneIn, ContentEq, GetSpan, GetSpanMut, ESTree)]
+#[estree(
+    rename = "Literal",
+    add_fields(value = BigIntLiteralValue, bigint = BigIntLiteralBigint),
+    field_order(span, value, raw, bigint),
+)]
+pub struct BigIntLiteral<'a> {
+    /// Node location in source code
     pub span: Span,
-    // valid regex is printed as {}
-    // invalid regex is printed as null, which we can't implement yet
-    pub value: EmptyObject,
-    pub regex: RegExp,
+    /// The bigint as it appears in source code
+    #[estree(ts_type = "string | null")]
+    pub raw: Atom<'a>,
+    /// The base representation used by the literal in source code
+    #[content_eq(skip)]
+    #[estree(skip)]
+    pub base: BigintBase,
 }
 
-#[derive(Debug, Clone, Hash)]
-#[cfg_attr(feature = "serde", derive(Serialize))]
-pub struct RegExp {
-    pub pattern: Atom,
+/// Regular expression literal
+///
+/// <https://tc39.es/ecma262/#sec-literals-regular-expression-literals>
+#[ast(visit)]
+#[derive(Debug)]
+#[generate_derive(CloneIn, ContentEq, GetSpan, GetSpanMut, ESTree)]
+#[estree(
+    rename = "Literal",
+    add_fields(value = RegExpLiteralValue),
+    field_order(span, value, raw, regex),
+)]
+pub struct RegExpLiteral<'a> {
+    /// Node location in source code
+    pub span: Span,
+    /// The parsed regular expression. See [`oxc_regular_expression`] for more
+    /// details.
+    #[estree(via = RegExpLiteralRegex)]
+    pub regex: RegExp<'a>,
+    /// The regular expression as it appears in source code
+    ///
+    /// `None` when this ast node is not constructed from the parser.
+    #[content_eq(skip)]
+    pub raw: Option<Atom<'a>>,
+}
+
+/// A regular expression
+///
+/// <https://tc39.es/ecma262/multipage/text-processing.html#sec-regexp-regular-expression-objects>
+#[ast]
+#[derive(Debug)]
+#[generate_derive(CloneIn, ContentEq, ESTree)]
+#[estree(no_type)]
+pub struct RegExp<'a> {
+    /// The regex pattern between the slashes
+    pub pattern: RegExpPattern<'a>,
+    /// Regex flags after the closing slash
     pub flags: RegExpFlags,
 }
 
-impl fmt::Display for RegExp {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "/{}/{}", self.pattern, self.flags)
-    }
+/// A regular expression pattern
+///
+/// This pattern may or may not be parsed.
+#[ast]
+#[derive(Debug)]
+#[generate_derive(CloneIn, ESTree)]
+#[estree(custom_serialize, ts_alias = "string")]
+pub enum RegExpPattern<'a> {
+    /// Unparsed pattern. Contains string slice of the pattern.
+    /// Pattern was not parsed, so may be valid or invalid.
+    Raw(&'a str) = 0,
+    /// An invalid pattern. Contains string slice of the pattern.
+    /// Pattern was parsed and found to be invalid.
+    Invalid(&'a str) = 1,
+    /// A parsed pattern. Read [Pattern] for more details.
+    /// Pattern was parsed and found to be valid.
+    Pattern(Box<'a, Pattern<'a>>) = 2,
 }
 
 bitflags! {
+    /// Regular expression flags.
+    ///
+    /// <https://developer.mozilla.org/en-US/docs/Web/JavaScript/Guide/Regular_expressions#advanced_searching_with_flags>
     #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
     pub struct RegExpFlags: u8 {
+        /// Global flag
+        ///
+        /// Causes the pattern to match multiple times.
         const G = 1 << 0;
+        /// Ignore case flag
+        ///
+        /// Causes the pattern to ignore case.
         const I = 1 << 1;
+        /// Multiline flag
+        ///
+        /// Causes `^` and `$` to match the start/end of each line.
         const M = 1 << 2;
+        /// DotAll flag
+        ///
+        /// Causes `.` to also match newlines.
         const S = 1 << 3;
+        /// Unicode flag
+        ///
+        /// Causes the pattern to treat the input as a sequence of Unicode code points.
         const U = 1 << 4;
+        /// Sticky flag
+        ///
+        /// Perform a "sticky" search that matches starting at the current position in the target string.
         const Y = 1 << 5;
+        /// Indices flag
+        ///
+        /// Causes the regular expression to generate indices for substring matches.
         const D = 1 << 6;
-        /// v flag from `https://github.com/tc39/proposal-regexp-set-notation`
+        /// Unicode sets flag
+        ///
+        /// Similar to the `u` flag, but also enables the `\\p{}` and `\\P{}` syntax.
+        /// Added by the [`v` flag proposal](https://github.com/tc39/proposal-regexp-set-notation).
         const V = 1 << 7;
     }
 }
 
-impl TryFrom<char> for RegExpFlags {
-    type Error = char;
-
-    fn try_from(value: char) -> Result<Self, Self::Error> {
-        match value {
-            'g' => Ok(Self::G),
-            'i' => Ok(Self::I),
-            'm' => Ok(Self::M),
-            's' => Ok(Self::S),
-            'u' => Ok(Self::U),
-            'y' => Ok(Self::Y),
-            'd' => Ok(Self::D),
-            'v' => Ok(Self::V),
-            _ => Err(value),
-        }
-    }
-}
-
-// TODO: should we implement TryFrom<&str> too?
-
-impl fmt::Display for RegExpFlags {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        if self.contains(Self::G) {
-            write!(f, "g")?;
-        }
-        if self.contains(Self::I) {
-            write!(f, "i")?;
-        }
-        if self.contains(Self::M) {
-            write!(f, "m")?;
-        }
-        if self.contains(Self::S) {
-            write!(f, "s")?;
-        }
-        if self.contains(Self::U) {
-            write!(f, "u")?;
-        }
-        if self.contains(Self::Y) {
-            write!(f, "y")?;
-        }
-        if self.contains(Self::D) {
-            write!(f, "d")?;
-        }
-        if self.contains(Self::V) {
-            write!(f, "v")?;
-        }
-        Ok(())
-    }
-}
-
-#[derive(Debug, Clone, Hash)]
-#[cfg_attr(feature = "serde", derive(Serialize))]
-pub struct EmptyObject;
-
-#[derive(Debug, Clone, Hash)]
-#[cfg_attr(feature = "serde", derive(Serialize), serde(tag = "type"))]
-pub struct StringLiteral {
-    #[cfg_attr(feature = "serde", serde(flatten))]
-    pub span: Span,
-    pub value: Atom,
-}
-
-impl StringLiteral {
-    pub fn new(span: Span, value: Atom) -> Self {
-        Self { span, value }
-    }
-
-    /// Static Semantics: `IsStringWellFormedUnicode`
-    /// test for \uD800-\uDFFF
-    pub fn is_string_well_formed_unicode(&self) -> bool {
-        let mut chars = self.value.chars();
-        while let Some(c) = chars.next() {
-            if c == '\\' && chars.next() == Some('u') {
-                let hex = &chars.as_str()[..4];
-                if let Ok(hex) = u32::from_str_radix(hex, 16) {
-                    if (0xd800..=0xdfff).contains(&hex) {
-                        return false;
-                    }
-                };
-            }
-        }
-        true
-    }
-}
+/// Dummy type to communicate the content of `RegExpFlags` to `oxc_ast_tools`.
+#[ast(foreign = RegExpFlags)]
+#[generate_derive(ESTree)]
+#[estree(custom_serialize, ts_alias = "string")]
+#[expect(dead_code)]
+struct RegExpFlagsAlias(u8);

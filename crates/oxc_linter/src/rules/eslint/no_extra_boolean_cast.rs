@@ -1,30 +1,23 @@
 use itertools::Itertools;
-use oxc_ast::{ast::Argument, AstKind};
-use oxc_diagnostics::{
-    miette::{self, Diagnostic},
-    thiserror::Error,
-};
+use oxc_ast::AstKind;
+use oxc_diagnostics::OxcDiagnostic;
 use oxc_macros::declare_oxc_lint;
 use oxc_span::{GetSpan, Span};
 use oxc_syntax::operator::{LogicalOperator, UnaryOperator};
 
-use crate::{context::LintContext, rule::Rule, AstNode};
+use crate::{AstNode, context::LintContext, rule::Rule};
 
-#[derive(Debug, Error, Diagnostic)]
-#[error("eslint(no-extra-boolean-cast): Redundant double negation")]
-#[diagnostic(
-    severity(warning),
-    help("Remove the double negation as it will already be coerced to a boolean")
-)]
-struct NoExtraDoubleNegationCastDiagnostic(#[label] pub Span);
+fn no_extra_double_negation_cast_diagnostic(span: Span) -> OxcDiagnostic {
+    OxcDiagnostic::warn("Redundant double negation")
+        .with_help("Remove the double negation as it will already be coerced to a boolean")
+        .with_label(span)
+}
 
-#[derive(Debug, Error, Diagnostic)]
-#[error("eslint(no-extra-boolean-cast): Redundant Boolean call")]
-#[diagnostic(
-    severity(warning),
-    help("Remove the Boolean call as it will already be coerced to a boolean")
-)]
-struct NoExtraBooleanCastDiagnostic(#[label] pub Span);
+fn no_extra_boolean_cast_diagnostic(span: Span) -> OxcDiagnostic {
+    OxcDiagnostic::warn("Redundant Boolean call")
+        .with_help("Remove the Boolean call as it will already be coerced to a boolean")
+        .with_label(span)
+}
 
 #[derive(Debug, Default, Clone)]
 pub struct NoExtraBooleanCast {
@@ -51,7 +44,11 @@ declare_oxc_lint!(
     /// if (!!foo || bar) {}
     /// ```
     NoExtraBooleanCast,
-    correctness
+    eslint,
+    correctness,
+    // a suggestion could be added. Note that lacking !! can mess up TS type
+    // narrowing sometimes, so it should not be an autofix
+    pending
 );
 
 impl Rule for NoExtraBooleanCast {
@@ -71,13 +68,15 @@ impl Rule for NoExtraBooleanCast {
                 if expr.callee.is_specific_id("Boolean")
                     && is_flagged_ctx(node, ctx, self.enforce_for_logical_operands) =>
             {
-                ctx.diagnostic(NoExtraBooleanCastDiagnostic(expr.span));
+                ctx.diagnostic(no_extra_boolean_cast_diagnostic(expr.span));
             }
             AstKind::UnaryExpression(unary) if unary.operator == UnaryOperator::LogicalNot => {
-                let Some(parent) = get_real_parent(node, ctx) else { return };
+                let Some(parent) = get_real_parent(node, ctx) else {
+                    return;
+                };
                 if matches!(parent.kind(), AstKind::UnaryExpression(p) if p.operator == UnaryOperator::LogicalNot && is_flagged_ctx(parent, ctx, self.enforce_for_logical_operands))
                 {
-                    ctx.diagnostic(NoExtraDoubleNegationCastDiagnostic(parent.kind().span()));
+                    ctx.diagnostic(no_extra_double_negation_cast_diagnostic(parent.kind().span()));
                 }
             }
             _ => {}
@@ -123,12 +122,12 @@ fn is_bool_fn_or_constructor_call(node: &AstNode) -> bool {
     match node.kind() {
         AstKind::CallExpression(expr) => expr
             .callee
-            .without_parenthesized()
+            .without_parentheses()
             .get_identifier_reference()
             .is_some_and(|x| x.name == "Boolean"),
         AstKind::NewExpression(expr) => expr
             .callee
-            .without_parenthesized()
+            .without_parentheses()
             .get_identifier_reference()
             .is_some_and(|x| x.name == "Boolean"),
         _ => false,
@@ -137,16 +136,16 @@ fn is_bool_fn_or_constructor_call(node: &AstNode) -> bool {
 
 fn is_first_arg(node: &AstNode, parent: &AstNode) -> bool {
     match parent.kind() {
-        AstKind::CallExpression(expr) => expr.arguments.first().map_or(false, |arg| {
-            if let Argument::Expression(expr) = arg {
-                expr.without_parenthesized().span() == node.kind().span()
+        AstKind::CallExpression(expr) => expr.arguments.first().is_some_and(|arg| {
+            if let Some(expr) = arg.as_expression() {
+                expr.without_parentheses().span() == node.kind().span()
             } else {
                 false
             }
         }),
-        AstKind::NewExpression(expr) => expr.arguments.first().map_or(false, |arg| {
-            if let Argument::Expression(expr) = arg {
-                expr.without_parenthesized().span() == node.kind().span()
+        AstKind::NewExpression(expr) => expr.arguments.first().is_some_and(|arg| {
+            if let Some(expr) = arg.as_expression() {
+                expr.without_parentheses().span() == node.kind().span()
             } else {
                 false
             }
@@ -156,25 +155,25 @@ fn is_first_arg(node: &AstNode, parent: &AstNode) -> bool {
 }
 
 fn is_inside_test_condition(node: &AstNode, ctx: &LintContext) -> bool {
-    get_real_parent(node, ctx).map_or(false, |parent| match parent.kind() {
+    get_real_parent(node, ctx).is_some_and(|parent| match parent.kind() {
         AstKind::IfStatement(stmt) => {
-            let expr_span = stmt.test.get_inner_expression().without_parenthesized().span();
+            let expr_span = stmt.test.get_inner_expression().without_parentheses().span();
             expr_span == node.kind().span()
         }
         AstKind::DoWhileStatement(stmt) => {
-            let expr_span = stmt.test.get_inner_expression().without_parenthesized().span();
+            let expr_span = stmt.test.get_inner_expression().without_parentheses().span();
             expr_span == node.kind().span()
         }
         AstKind::WhileStatement(stmt) => {
-            let expr_span = stmt.test.get_inner_expression().without_parenthesized().span();
+            let expr_span = stmt.test.get_inner_expression().without_parentheses().span();
             expr_span == node.kind().span()
         }
         AstKind::ConditionalExpression(stmt) => {
-            let expr_span = stmt.test.get_inner_expression().without_parenthesized().span();
+            let expr_span = stmt.test.get_inner_expression().without_parentheses().span();
             expr_span == node.kind().span()
         }
-        AstKind::ForStatement(stmt) => stmt.test.as_ref().map_or(false, |expr| {
-            let expr_span = expr.get_inner_expression().without_parenthesized().span();
+        AstKind::ForStatement(stmt) => stmt.test.as_ref().is_some_and(|expr| {
+            let expr_span = expr.get_inner_expression().without_parentheses().span();
             expr_span == node.kind().span()
         }),
         _ => false,
@@ -190,7 +189,7 @@ fn is_unary_negation(node: &AstNode) -> bool {
 
 fn get_real_parent<'a, 'b>(node: &AstNode, ctx: &'a LintContext<'b>) -> Option<&'a AstNode<'b>> {
     for (_, parent) in
-        ctx.nodes().iter_parents(node.id()).tuple_windows::<(&AstNode<'b>, &AstNode<'b>)>()
+        ctx.nodes().ancestors(node.id()).tuple_windows::<(&AstNode<'b>, &AstNode<'b>)>()
     {
         if let AstKind::Argument(_)
         | AstKind::ParenthesizedExpression(_)
@@ -874,5 +873,6 @@ fn test() {
         ("if (!Boolean(a as any)) { }", None),
     ];
 
-    Tester::new(NoExtraBooleanCast::NAME, pass, fail).test_and_snapshot();
+    Tester::new(NoExtraBooleanCast::NAME, NoExtraBooleanCast::PLUGIN, pass, fail)
+        .test_and_snapshot();
 }

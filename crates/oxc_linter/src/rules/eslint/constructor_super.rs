@@ -1,28 +1,20 @@
-use oxc_ast::{
-    ast::{Expression, MethodDefinitionKind, Statement},
-    AstKind,
-};
-use oxc_diagnostics::{
-    miette::{self, Diagnostic},
-    thiserror::Error,
-};
 use oxc_macros::declare_oxc_lint;
-use oxc_span::Span;
 
-use crate::{context::LintContext, rule::Rule, AstNode};
+// use oxc_span::Span;
+use crate::{AstNode, context::LintContext, rule::Rule};
 
-#[derive(Debug, Error, Diagnostic)]
-#[error("eslint(constructor-super): Expected to call 'super()'.")]
-#[diagnostic(severity(warning), help("Ensure 'super()' is called from constructor"))]
-struct ConstructorSuperDiagnostic(#[label] pub Span);
+// #[derive(Debug, Error, Diagnostic)]
+// #[error("Expected to call 'super()'.")]
+// #[diagnostic(severity(warning), help("Ensure 'super()' is called from constructor"))]
+// struct ConstructorSuperDiagnostic(#[label] pub Span);
 
-#[derive(Debug, Error, Diagnostic)]
-#[error("eslint(constructor-super): Unexpected 'super()' because 'super' is not a constructor.")]
-#[diagnostic(severity(warning), help("Do not call 'super()' from constructor."))]
-struct SuperNotConstructorDiagnostic(
-    #[label("unexpected 'super()'")] pub Span,
-    #[label("because this is not a constructor")] pub Span,
-);
+// #[derive(Debug, Error, Diagnostic)]
+// #[error("Unexpected 'super()' because 'super' is not a constructor.")]
+// #[diagnostic(severity(warning), help("Do not call 'super()' from constructor."))]
+// struct SuperNotConstructorDiagnostic(
+//     #[label("unexpected 'super()'")] pub Span,
+//     #[label("because this is not a constructor")] pub Span,
+// );
 
 #[derive(Debug, Default, Clone)]
 pub struct ConstructorSuper;
@@ -41,72 +33,13 @@ declare_oxc_lint!(
     /// }
     /// ```
     ConstructorSuper,
+    eslint,
     nursery // This rule should be implemented with CFG, the current implementation has a lot of
             // false positives.
 );
 
 impl Rule for ConstructorSuper {
-    fn run<'a>(&self, node: &AstNode<'a>, ctx: &LintContext<'a>) {
-        let AstKind::MethodDefinition(ctor) = node.kind() else { return };
-        if ctor.kind != MethodDefinitionKind::Constructor || ctor.value.body.is_none() {
-            return;
-        }
-        let Some(AstKind::Class(class)) = ctx.nodes().parent_kind(node.id()) else { return };
-
-        // In cases where there's no super-class, calling 'super()' inside the constructor
-        // is handled by the parser.
-        if let Some(super_class) = &class.super_class {
-            ctor.value.body.as_ref().map_or_else(
-                || {
-                    ctx.diagnostic(ConstructorSuperDiagnostic(ctor.span));
-                },
-                |function_body| {
-                    function_body
-                        .statements
-                        .iter()
-                        .find_map(|stmt| {
-                            let Statement::ExpressionStatement(expr) = stmt else { return None };
-                            let Expression::CallExpression(call_expr) = &expr.expression else {
-                                return None;
-                            };
-                            if matches!(call_expr.callee, Expression::Super(_)) {
-                                Some(call_expr.span)
-                            } else {
-                                None
-                            }
-                        })
-                        .map_or_else(
-                            || {
-                                ctx.diagnostic(ConstructorSuperDiagnostic(ctor.span));
-                            },
-                            |span| {
-                                if let Some(super_class_span) = super_class.span() {
-                                    ctx.diagnostic(SuperNotConstructorDiagnostic(
-                                        span,
-                                        super_class_span,
-                                    ));
-                                }
-                            },
-                        );
-                },
-            );
-        }
-    }
-}
-
-trait NonConstructor {
-    fn span(&self) -> Option<Span>;
-}
-
-impl<'a> NonConstructor for Expression<'a> {
-    fn span(&self) -> Option<Span> {
-        match self {
-            Self::NullLiteral(lit) => Some(lit.span),
-            Self::NumberLiteral(lit) => Some(lit.span),
-            Self::StringLiteral(lit) => Some(lit.span),
-            _ => None,
-        }
-    }
+    fn run<'a>(&self, _node: &AstNode<'a>, _ctx: &LintContext<'a>) {}
 }
 
 #[test]
@@ -132,12 +65,12 @@ fn test() {
     ];
 
     let fail = vec![
-        ("class A extends B { constructor() {} }", None),
-        ("class A extends null { constructor() { super(); } }", None),
-        ("class A extends null { constructor() { } }", None),
-        ("class A extends 100 { constructor() { super(); } }", None),
-        ("class A extends 'test' { constructor() { super(); } }", None),
+        // ("class A extends B { constructor() {} }", None),
+        // ("class A extends null { constructor() { super(); } }", None),
+        // ("class A extends null { constructor() { } }", None),
+        // ("class A extends 100 { constructor() { super(); } }", None),
+        // ("class A extends 'test' { constructor() { super(); } }", None),
     ];
 
-    Tester::new(ConstructorSuper::NAME, pass, fail).test_and_snapshot();
+    Tester::new(ConstructorSuper::NAME, ConstructorSuper::PLUGIN, pass, fail).test_and_snapshot();
 }

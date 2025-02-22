@@ -1,17 +1,13 @@
-use oxc_diagnostics::{
-    miette::{self, Diagnostic},
-    thiserror::Error,
-};
+use oxc_diagnostics::OxcDiagnostic;
 use oxc_macros::declare_oxc_lint;
 use oxc_semantic::SymbolId;
 use oxc_span::Span;
 
 use crate::{context::LintContext, rule::Rule};
 
-#[derive(Debug, Error, Diagnostic)]
-#[error("eslint(no-ex-assign): Do not assign to the exception parameter.")]
-#[diagnostic(severity(warning))]
-struct NoExAssignDiagnostic(#[label] pub Span);
+fn no_ex_assign_diagnostic(span: Span) -> OxcDiagnostic {
+    OxcDiagnostic::warn("Do not assign to the exception parameter.").with_help("If a catch clause in a try statement accidentally (or purposely) assigns another value to the exception parameter, it is impossible to refer to the error from that point on. Since there is no arguments object to offer alternative access to this data, assignment of the parameter is absolutely destructive.").with_label(span)
+}
 
 #[derive(Debug, Default, Clone)]
 pub struct NoExAssign;
@@ -29,23 +25,26 @@ declare_oxc_lint!(
     ///
     /// ### Example
     /// ```javascript
-    // try {
-    //     // code
-    // } catch (e) {
-    //     e = 10;
-    // }
+    /// try {
+    ///     // code
+    /// } catch (e) {
+    ///     e = 10;
+    /// }
     /// ```
     NoExAssign,
+    eslint,
     correctness
 );
 
 impl Rule for NoExAssign {
     fn run_on_symbol(&self, symbol_id: SymbolId, ctx: &LintContext<'_>) {
         let symbol_table = ctx.semantic().symbols();
-        if symbol_table.get_flag(symbol_id).is_catch_variable() {
+        if symbol_table.get_flags(symbol_id).is_catch_variable() {
             for reference in symbol_table.get_resolved_references(symbol_id) {
                 if reference.is_write() {
-                    ctx.diagnostic(NoExAssignDiagnostic(reference.span()));
+                    ctx.diagnostic(no_ex_assign_diagnostic(
+                        ctx.semantic().reference_span(reference),
+                    ));
                 }
             }
         }
@@ -70,5 +69,5 @@ fn test() {
         ("try { } catch ({message}) { message = 10; }", None),
     ];
 
-    Tester::new(NoExAssign::NAME, pass, fail).test_and_snapshot();
+    Tester::new(NoExAssign::NAME, NoExAssign::PLUGIN, pass, fail).test_and_snapshot();
 }

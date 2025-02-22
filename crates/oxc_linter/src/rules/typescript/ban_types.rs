@@ -1,32 +1,37 @@
+use cow_utils::CowUtils;
 use oxc_ast::AstKind;
-use oxc_diagnostics::{
-    miette::{self, Diagnostic},
-    thiserror::{self, Error},
-};
+use oxc_diagnostics::OxcDiagnostic;
 use oxc_macros::declare_oxc_lint;
-use oxc_span::{Atom, Span};
+use oxc_span::Span;
 
-use crate::{context::LintContext, rule::Rule, AstNode};
+use crate::{
+    AstNode,
+    context::{ContextHost, LintContext},
+    rule::Rule,
+};
 
-#[derive(Debug, Error, Diagnostic)]
-pub enum BanTypesDiagnostic {
-    #[error("typescript-eslint(ban-types): Do not use {0:?} as a type. Use \"{1}\" instead")]
-    #[diagnostic(severity(warning))]
-    Type(Atom, String, #[label] Span),
+fn type_diagnostic(banned_type: &str, suggested_type: &str, span2: Span) -> OxcDiagnostic {
+    OxcDiagnostic::warn(format!(
+        "Do not use {banned_type:?} as a type. Use \"{suggested_type}\" instead"
+    ))
+    .with_label(span2)
+}
 
-    #[error("typescript-eslint(ban-types): Prefer explicitly define the object shape")]
-    #[diagnostic(severity(warning), help("This type means \"any non-nullish value\", which is slightly better than 'unknown', but it's still a broad type"))]
-    TypeLiteral(#[label] Span),
+fn type_literal(span: Span) -> OxcDiagnostic {
+    OxcDiagnostic::warn("Prefer explicitly define the object shape")
+        .with_help("This type means \"any non-nullish value\", which is slightly better than 'unknown', but it's still a broad type")
+        .with_label(span)
+}
 
-    #[error("typescript-eslint(ban-types): Don't use `Function` as a type")]
-    #[diagnostic(severity(warning), help("The `Function` type accepts any function-like value"))]
-    Function(#[label] Span),
+fn function(span: Span) -> OxcDiagnostic {
+    OxcDiagnostic::warn("Don't use `Function` as a type")
+        .with_help("The `Function` type accepts any function-like value")
+        .with_label(span)
+}
 
-    #[error(
-        "typescript-eslint(ban-types): 'The `Object` type actually means \"any non-nullish value\""
-    )]
-    #[diagnostic(severity(warning))]
-    Object(#[label] Span),
+fn object(span: Span) -> OxcDiagnostic {
+    OxcDiagnostic::warn("'The `Object` type actually means \"any non-nullish value\"")
+        .with_label(span)
 }
 
 #[derive(Debug, Default, Clone)]
@@ -48,7 +53,9 @@ declare_oxc_lint!(
     /// let bar: Boolean = true;
     /// ```
     BanTypes,
-    pedantic
+    typescript,
+    pedantic,
+    pending
 );
 
 impl Rule for BanTypes {
@@ -62,28 +69,32 @@ impl Rule for BanTypes {
 
                 match name.as_str() {
                     "String" | "Boolean" | "Number" | "Symbol" | "BigInt" => {
-                        ctx.diagnostic(BanTypesDiagnostic::Type(
-                            name.clone(),
-                            name.to_lowercase(),
+                        ctx.diagnostic(type_diagnostic(
+                            name.as_str(),
+                            &name.as_str().cow_to_ascii_lowercase(),
                             typ.span,
                         ));
                     }
                     "Object" => {
-                        ctx.diagnostic(BanTypesDiagnostic::Object(typ.span));
+                        ctx.diagnostic(object(typ.span));
                     }
                     "Function" => {
-                        ctx.diagnostic(BanTypesDiagnostic::Function(typ.span));
+                        ctx.diagnostic(function(typ.span));
                     }
                     _ => {}
                 }
             }
             AstKind::TSTypeLiteral(typ) => {
                 if typ.members.is_empty() {
-                    ctx.diagnostic(BanTypesDiagnostic::TypeLiteral(typ.span));
+                    ctx.diagnostic(type_literal(typ.span));
                 }
             }
             _ => {}
         }
+    }
+
+    fn should_run(&self, ctx: &ContextHost) -> bool {
+        ctx.source_type().is_typescript()
     }
 }
 
@@ -160,5 +171,5 @@ type Props = {
         ),
     ];
 
-    Tester::new(BanTypes::NAME, pass, fail).test_and_snapshot();
+    Tester::new(BanTypes::NAME, BanTypes::PLUGIN, pass, fail).test_and_snapshot();
 }

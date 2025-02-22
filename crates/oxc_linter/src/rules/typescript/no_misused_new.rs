@@ -1,28 +1,24 @@
 use oxc_ast::{
-    ast::{ClassElement, PropertyKey, TSSignature, TSType, TSTypeName},
     AstKind,
+    ast::{ClassElement, PropertyKey, TSSignature, TSType, TSTypeName},
 };
-use oxc_diagnostics::{
-    miette::{self, Diagnostic},
-    thiserror::Error,
-};
+use oxc_diagnostics::OxcDiagnostic;
 use oxc_macros::declare_oxc_lint;
 use oxc_span::{GetSpan, Span};
 
-use crate::{context::LintContext, rule::Rule, AstNode};
+use crate::{AstNode, context::LintContext, rule::Rule};
 
-#[derive(Debug, Error, Diagnostic)]
-#[error("typescript-eslint(no-misused-new): Interfaces cannot be constructed, only classes.")]
-#[diagnostic(severity(warning), help("Consider removing this method from your interface."))]
-struct NoMisusedNewInterfaceDiagnostic(#[label] pub Span);
+fn no_misused_new_interface_diagnostic(span: Span) -> OxcDiagnostic {
+    OxcDiagnostic::warn("Interfaces cannot be constructed, only classes.")
+        .with_help("Consider removing this method from your interface.")
+        .with_label(span)
+}
 
-#[derive(Debug, Error, Diagnostic)]
-#[error("typescript-eslint(no-misused-new): Class cannot have method named `new`.")]
-#[diagnostic(
-    severity(warning),
-    help("This method name is confusing, consider renaming the method to `constructor`")
-)]
-struct NoMisusedNewClassDiagnostic(#[label] pub Span);
+fn no_misused_new_class_diagnostic(span: Span) -> OxcDiagnostic {
+    OxcDiagnostic::warn("Class cannot have method named `new`.")
+        .with_help("This method name is confusing, consider renaming the method to `constructor`")
+        .with_label(span)
+}
 
 #[derive(Debug, Default, Clone)]
 pub struct NoMisusedNew;
@@ -36,23 +32,25 @@ declare_oxc_lint!(
     ///
     /// JavaScript classes may define a constructor method that runs
     /// when a class instance is newly created.
-    /// TypeScript allows interfaces that describe a static class object to define
-    /// a new() method (though this is rarely used in real world code).
+    ///
+    /// TypeScript allows interfaces that describe a static class object to
+    /// define a `new()` method (though this is rarely used in real world code).
     /// Developers new to JavaScript classes and/or TypeScript interfaces may
     /// sometimes confuse when to use constructor or new.
     ///
     /// ### Example
     /// ```typescript
-    // declare class C {
-    //   new(): C;
-    // }
-
-    // interface I {
-    //   new (): I;
-    //   constructor(): void;
-    // }
+    /// declare class C {
+    ///   new(): C;
+    /// }
+    ///
+    /// interface I {
+    ///   new (): I;
+    ///   constructor(): void;
+    /// }
     /// ```
     NoMisusedNew,
+    typescript,
     correctness
 );
 
@@ -69,10 +67,9 @@ impl Rule for NoMisusedNew {
                             {
                                 if let TSTypeName::IdentifierReference(id) = &type_ref.type_name {
                                     if id.name == decl_name {
-                                        ctx.diagnostic(NoMisusedNewInterfaceDiagnostic(Span::new(
-                                            sig.span.start,
-                                            sig.span.start + 3,
-                                        )));
+                                        ctx.diagnostic(no_misused_new_interface_diagnostic(
+                                            Span::new(sig.span.start, sig.span.start + 3),
+                                        ));
                                     }
                                 }
                             }
@@ -81,9 +78,9 @@ impl Rule for NoMisusedNew {
                 }
             }
             AstKind::TSMethodSignature(method_sig) => {
-                if let PropertyKey::Identifier(id) = &method_sig.key {
+                if let PropertyKey::StaticIdentifier(id) = &method_sig.key {
                     if id.name == "constructor" {
-                        ctx.diagnostic(NoMisusedNewInterfaceDiagnostic(method_sig.key.span()));
+                        ctx.diagnostic(no_misused_new_interface_diagnostic(method_sig.key.span()));
                     }
                 }
             }
@@ -102,7 +99,7 @@ impl Rule for NoMisusedNew {
                                             &type_ref.type_name
                                         {
                                             if current_id.name == cls_name {
-                                                ctx.diagnostic(NoMisusedNewClassDiagnostic(
+                                                ctx.diagnostic(no_misused_new_class_diagnostic(
                                                     method.key.span(),
                                                 ));
                                             }
@@ -116,6 +113,10 @@ impl Rule for NoMisusedNew {
             }
             _ => {}
         }
+    }
+
+    fn should_run(&self, ctx: &crate::rules::ContextHost) -> bool {
+        ctx.source_type().is_typescript()
     }
 }
 
@@ -148,5 +149,5 @@ fn test() {
         "interface I { constructor(): '';}",
     ];
 
-    Tester::new_without_config(NoMisusedNew::NAME, pass, fail).test_and_snapshot();
+    Tester::new(NoMisusedNew::NAME, NoMisusedNew::PLUGIN, pass, fail).test_and_snapshot();
 }

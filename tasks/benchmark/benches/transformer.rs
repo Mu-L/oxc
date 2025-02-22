@@ -1,45 +1,62 @@
-#[cfg(not(target_env = "msvc"))]
-#[global_allocator]
-static GLOBAL: jemallocator::Jemalloc = jemallocator::Jemalloc;
-
-#[cfg(target_os = "windows")]
-#[global_allocator]
-static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
-
-use std::{fs, hint::black_box};
+use std::path::Path;
 
 use oxc_allocator::Allocator;
-use oxc_benchmark::{criterion_group, criterion_main, BenchmarkId, Criterion};
-use oxc_parser::Parser;
+use oxc_benchmark::{BenchmarkId, Criterion, criterion_group, criterion_main};
+use oxc_parser::{Parser, ParserReturn};
 use oxc_semantic::SemanticBuilder;
 use oxc_span::SourceType;
-use oxc_tasks_common::project_root;
-use oxc_transformer::{TransformOptions, Transformer};
+use oxc_tasks_common::TestFiles;
+use oxc_transformer::{EnvOptions, TransformOptions, Transformer};
 
 fn bench_transformer(criterion: &mut Criterion) {
     let mut group = criterion.benchmark_group("transformer");
 
-    let dir = project_root().join("tasks/coverage/typescript/src/compiler");
-    let files = ["binder.ts", "scanner.ts", "checker.ts", "parser.ts"];
+    for file in TestFiles::complicated().files() {
+        let id = BenchmarkId::from_parameter(&file.file_name);
+        let source_type = SourceType::from_path(&file.file_name).unwrap();
+        let source_text = file.source_text.as_str();
 
-    for file in files {
-        let path = dir.join(file);
-        let source_text = fs::read_to_string(&path).unwrap();
-        let source_type = SourceType::from_path(file).unwrap();
-        let id = BenchmarkId::from_parameter(file);
-        group.bench_with_input(id, &source_text, |b, source_text| {
-            // The whole transformation process needs to be benched otherwise it will end up with
-            // transforming an already transformed AST.
-            b.iter_with_large_drop(|| {
-                let allocator = Allocator::default();
-                let program = Parser::new(&allocator, source_text, source_type).parse().program;
-                let semantic =
-                    SemanticBuilder::new(source_text, source_type).build(&program).semantic;
-                let program = allocator.alloc(program);
-                let transform_options = TransformOptions::default();
-                Transformer::new(&allocator, source_type, semantic, transform_options)
-                    .build(black_box(program));
-                allocator
+        // Create `Allocator` outside of `bench_function`, so same allocator is used for
+        // both the warmup and measurement phases
+        let mut allocator = Allocator::default();
+
+        let mut transform_options = TransformOptions::enable_all();
+        // Even the plugins are unfinished, we still want to enable all of them
+        // to track the performance changes during the development.
+        transform_options.env = EnvOptions::enable_all(/* include_unfinished_plugins */ true);
+
+        group.bench_function(id, |b| {
+            b.iter_with_setup_wrapper(|runner| {
+                // Reset allocator at start of each iteration
+                allocator.reset();
+
+                // Create fresh AST + semantic data for each iteration
+                let ParserReturn { mut program, .. } =
+                    Parser::new(&allocator, source_text, source_type).parse();
+                let (symbols, scopes) = SemanticBuilder::new()
+                    // Estimate transformer will triple scopes, symbols, references
+                    .with_excess_capacity(2.0)
+                    .build(&program)
+                    .semantic
+                    .into_symbol_table_and_scope_tree();
+
+                runner.run(|| {
+                    let ret = Transformer::new(
+                        &allocator,
+                        Path::new(&file.file_name),
+                        &transform_options,
+                    )
+                    .build_with_symbols_and_scopes(
+                        symbols,
+                        scopes,
+                        &mut program,
+                    );
+
+                    // Return the `TransformerReturn`, so it's dropped outside of the measured section.
+                    // `TransformerReturn` contains `ScopeTree` and `SymbolTable` which are costly to drop.
+                    // That's not central to transformer, so we don't want it included in this measure.
+                    ret
+                });
             });
         });
     }

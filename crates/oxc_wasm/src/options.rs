@@ -1,168 +1,138 @@
+use serde::Deserialize;
+use tsify::Tsify;
 use wasm_bindgen::prelude::*;
 
-#[wasm_bindgen]
-#[derive(Default, Clone, Copy)]
+#[derive(Debug, Default, Clone, Deserialize, Tsify)]
+#[tsify(from_wasm_abi)]
+#[serde(rename_all = "camelCase")]
+pub struct OxcOptions {
+    #[tsify(optional)]
+    pub run: Option<OxcRunOptions>,
+    #[tsify(optional)]
+    pub parser: Option<OxcParserOptions>,
+    #[tsify(optional)]
+    pub linter: Option<OxcLinterOptions>,
+    #[tsify(optional)]
+    pub transformer: Option<OxcTransformerOptions>,
+    #[tsify(optional)]
+    pub codegen: Option<OxcCodegenOptions>,
+    #[tsify(optional)]
+    pub minifier: Option<OxcMinifierOptions>,
+    #[tsify(optional)]
+    pub control_flow: Option<OxcControlFlowOptions>,
+}
+
+#[derive(Debug, Default, Clone, Deserialize, Tsify)]
+#[tsify(from_wasm_abi)]
+#[serde(rename_all = "camelCase")]
 pub struct OxcRunOptions {
-    syntax: bool,
-    lint: bool,
-    format: bool,
-    transform: bool,
-    type_check: bool,
+    #[tsify(optional)]
+    pub syntax: Option<bool>,
+    #[tsify(optional)]
+    pub lint: Option<bool>,
+    #[tsify(optional)]
+    pub format: Option<bool>,
+    #[tsify(optional)]
+    pub prettier_format: Option<bool>,
+    #[tsify(optional)]
+    pub prettier_ir: Option<bool>,
+    #[tsify(optional)]
+    pub transform: Option<bool>,
+    #[tsify(optional)]
+    pub type_check: Option<bool>,
+    #[tsify(optional)]
+    pub scope: Option<bool>,
+    #[tsify(optional)]
+    pub symbol: Option<bool>,
 }
 
-#[wasm_bindgen]
-impl OxcRunOptions {
-    #[wasm_bindgen(constructor)]
-    pub fn new() -> Self {
-        Self { syntax: true, lint: true, ..Self::default() }
-    }
-
-    #[wasm_bindgen(getter)]
-    pub fn syntax(self) -> bool {
-        self.format
-    }
-
-    #[wasm_bindgen(setter)]
-    pub fn set_syntax(&mut self, yes: bool) {
-        self.syntax = yes;
-    }
-
-    #[wasm_bindgen(getter)]
-    pub fn lint(self) -> bool {
-        self.lint
-    }
-
-    #[wasm_bindgen(setter)]
-    pub fn set_lint(&mut self, yes: bool) {
-        self.lint = yes;
-    }
-
-    #[wasm_bindgen(getter)]
-    pub fn format(self) -> bool {
-        self.format
-    }
-
-    #[wasm_bindgen(setter)]
-    pub fn set_format(&mut self, yes: bool) {
-        self.format = yes;
-    }
-
-    #[wasm_bindgen(getter)]
-    pub fn transform(self) -> bool {
-        self.transform
-    }
-
-    #[wasm_bindgen(setter)]
-    pub fn set_transform(&mut self, yes: bool) {
-        self.transform = yes;
-    }
-
-    #[wasm_bindgen(getter)]
-    pub fn type_check(self) -> bool {
-        self.type_check
-    }
-
-    #[wasm_bindgen(setter)]
-    pub fn set_type_check(&mut self, yes: bool) {
-        self.type_check = yes;
-    }
-}
-
-#[wasm_bindgen]
-#[derive(Default, Clone, Copy)]
+#[derive(Debug, Default, Clone, Deserialize, Tsify)]
+#[tsify(from_wasm_abi)]
+#[serde(rename_all = "camelCase")]
 pub struct OxcParserOptions {
-    #[wasm_bindgen(js_name = allowReturnOutsideFunction)]
-    pub allow_return_outside_function: bool,
+    #[tsify(optional)]
+    pub allow_return_outside_function: Option<bool>,
+    #[tsify(optional)]
+    pub preserve_parens: Option<bool>,
+    #[tsify(optional, type = "\"script\" | \"module\"")]
+    pub source_type: Option<String>,
+    #[tsify(optional)]
+    pub source_filename: Option<String>,
 }
 
-#[wasm_bindgen]
-impl OxcParserOptions {
-    #[wasm_bindgen(constructor)]
-    pub fn new() -> Self {
-        Self::default()
-    }
+#[derive(Debug, Default, Clone, Deserialize, Tsify)]
+#[tsify(from_wasm_abi)]
+#[serde(rename_all = "camelCase")]
+// allow empty object for future compatibility
+#[expect(clippy::empty_structs_with_brackets)]
+pub struct OxcLinterOptions {}
+
+#[derive(Debug, Default, Clone, Deserialize, Tsify)]
+#[tsify(from_wasm_abi)]
+#[serde(rename_all = "camelCase")]
+pub struct OxcTransformerOptions {
+    #[tsify(optional)]
+    pub target: Option<String>,
+
+    #[tsify(optional)]
+    pub isolated_declarations: Option<bool>,
 }
 
-#[wasm_bindgen]
-#[derive(Default, Clone, Copy)]
-pub struct OxcLinterOptions;
-
-#[wasm_bindgen]
-impl OxcLinterOptions {
-    #[wasm_bindgen(constructor)]
-    pub fn new() -> Self {
-        Self
-    }
+#[derive(Debug, Default, Clone, Deserialize, Tsify)]
+#[tsify(from_wasm_abi)]
+#[serde(rename_all = "camelCase")]
+pub struct OxcCodegenOptions {
+    #[tsify(optional)]
+    pub indentation: Option<u8>,
+    #[tsify(optional)]
+    pub enable_typescript: Option<bool>,
 }
 
-#[wasm_bindgen]
-#[derive(Default, Clone, Copy)]
-pub struct OxcFormatterOptions {
-    pub indentation: u8,
+#[derive(Debug, Default, Clone, Deserialize, Tsify)]
+#[tsify(from_wasm_abi)]
+#[serde(rename_all = "camelCase")]
+pub struct OxcControlFlowOptions {
+    #[tsify(optional)]
+    pub verbose: Option<bool>,
 }
 
-#[wasm_bindgen]
-impl OxcFormatterOptions {
-    #[wasm_bindgen(constructor)]
-    pub fn new() -> Self {
-        Self::default()
-    }
-}
-
-#[wasm_bindgen]
-#[derive(Default, Clone, Copy)]
+#[derive(Debug, Default, Clone, Deserialize, Tsify)]
+#[tsify(from_wasm_abi)]
+#[serde(rename_all = "camelCase")]
 pub struct OxcMinifierOptions {
-    whitespace: bool,
-    mangle: bool,
-    compress: bool,
+    #[tsify(optional)]
+    pub whitespace: Option<bool>,
+    #[tsify(optional)]
+    pub mangle: Option<bool>,
+    #[tsify(optional)]
+    pub compress: Option<bool>,
+    #[tsify(optional)]
+    pub compress_options: Option<OxcCompressOptions>,
 }
 
-#[wasm_bindgen]
-impl OxcMinifierOptions {
-    #[wasm_bindgen(constructor)]
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    #[wasm_bindgen(getter)]
-    pub fn whitespace(self) -> bool {
-        self.whitespace
-    }
-
-    #[wasm_bindgen(setter)]
-    pub fn set_whitespace(&mut self, yes: bool) {
-        self.whitespace = yes;
-    }
-
-    #[wasm_bindgen(getter)]
-    pub fn mangle(self) -> bool {
-        self.mangle
-    }
-
-    #[wasm_bindgen(setter)]
-    pub fn set_mangle(&mut self, yes: bool) {
-        self.mangle = yes;
-    }
-
-    #[wasm_bindgen(getter)]
-    pub fn compress(self) -> bool {
-        self.compress
-    }
-
-    #[wasm_bindgen(setter)]
-    pub fn set_compress(&mut self, yes: bool) {
-        self.compress = yes;
-    }
+#[derive(Debug, Clone, Deserialize, Tsify)]
+#[tsify(from_wasm_abi)]
+pub struct OxcCompressOptions {
+    pub booleans: bool,
+    pub drop_debugger: bool,
+    pub drop_console: bool,
+    pub evaluate: bool,
+    pub join_vars: bool,
+    pub loops: bool,
+    pub typeofs: bool,
 }
 
-#[wasm_bindgen]
-#[derive(Default, Clone, Copy)]
-pub struct OxcTypeCheckingOptions;
-
-#[wasm_bindgen]
-impl OxcTypeCheckingOptions {
-    #[wasm_bindgen(constructor)]
-    pub fn new() -> Self {
-        Self
+// keep same with `oxc_minifier::options::CompressOptions`
+impl Default for OxcCompressOptions {
+    fn default() -> Self {
+        Self {
+            booleans: true,
+            drop_debugger: true,
+            drop_console: false,
+            evaluate: true,
+            join_vars: true,
+            loops: true,
+            typeofs: true,
+        }
     }
 }

@@ -1,24 +1,23 @@
 [package]
-name                   = "oxc_diagnostics"
-version                = "0.2.0"
-authors.workspace      = true
-description.workspace  = true
-edition.workspace      = true
-homepage.workspace     = true
-keywords.workspace     = true
-license.workspace      = true
-repository.workspace   = true
+name = "oxc_diagnostics"
+version = "0.52.0"
+authors.workspace = true
+categories.workspace = true
+edition.workspace = true
+homepage.workspace = true
+include = ["/src"]
+keywords.workspace = true
+license.workspace = true
+repository.workspace = true
 rust-version.workspace = true
-categories.workspace   = true
+description.workspace = true
+
+[lints]
+workspace = true
 
 [lib]
 doctest = false
 
 [dependencies]
-thiserror = { workspace = true }
-miette    = { workspace = true }
-
-unicode-width = "0.1.11"
-owo-colors    = { version = "3.5.0" }
-textwrap      = { version = "=0.15.0" } # pinned to 0.15.0 to sync with miette
-is-terminal   = { version = "0.4.9" }
+cow-utils = { workspace = true }
+miette = { workspace = true }

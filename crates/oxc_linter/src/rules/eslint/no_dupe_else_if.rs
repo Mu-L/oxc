@@ -1,26 +1,19 @@
 use oxc_ast::{
-    ast::{Expression, Statement},
     AstKind,
+    ast::{Expression, Statement},
 };
-use oxc_diagnostics::{
-    miette::{self, Diagnostic},
-    thiserror::Error,
-};
+use oxc_diagnostics::OxcDiagnostic;
 use oxc_macros::declare_oxc_lint;
-use oxc_span::{GetSpan, Span};
+use oxc_span::{ContentEq, GetSpan, Span};
 use oxc_syntax::operator::LogicalOperator;
 
-use crate::{ast_util::calculate_hash, context::LintContext, rule::Rule, AstNode};
+use crate::{AstNode, context::LintContext, rule::Rule};
 
-#[derive(Debug, Error, Diagnostic)]
-#[error("eslint(no-dupe-else-if): duplicate conditions in if-else-if chains")]
-#[diagnostic(
-    severity(warning),
-    help(
-        "This branch can never execute. Its condition is a duplicate or covered by previous conditions in the if-else-if chain"
-    )
-)]
-struct NoDupeElseIfDiagnostic(#[label] pub Span, #[label] pub Span);
+fn no_dupe_else_if_diagnostic(first_test: Span, second_test: Span) -> OxcDiagnostic {
+    OxcDiagnostic::warn("duplicate conditions in if-else-if chains")
+        .with_help("This branch can never execute. Its condition is a duplicate or covered by previous conditions in the if-else-if chain")
+        .with_labels([first_test, second_test])
+}
 
 #[derive(Debug, Default, Clone)]
 pub struct NoDupeElseIf;
@@ -37,17 +30,77 @@ declare_oxc_lint!(
     /// a duplicate will evaluate to the same true or false value as the identical expression earlier in the chain, meaning that its branch can never execute.
     ///
     ///
-    /// ### Example
+    /// ### Examples
+    ///
+    /// Examples of **incorrect** code for this rule:
+    ///
     /// ```javascript
     /// if (a) {
-    /// foo();
+    ///     foo();
     /// } else if (b) {
     ///     bar();
     /// } else if (b) {
     ///     baz();
     /// }
     /// ```
+    ///
+    /// ```javascript
+    /// if (a || b) {
+    ///    foo();
+    /// } else if (a) {
+    ///    bar();
+    /// }
+    /// ```
+    ///
+    /// ```javascript
+    /// if (n === 1) {
+    ///     foo();
+    /// } else if (n === 2) {
+    ///     bar();
+    /// } else if (n === 3) {
+    ///     baz();
+    /// } else if (n === 2) {
+    ///     quux();
+    /// } else if (n === 5) {
+    ///     quuux();
+    /// }
+    /// ```
+    ///
+    /// Examples of **correct** code for this rule:
+    ///
+    /// ```javascript
+    /// if (a) {
+    ///     foo();
+    /// } else if (b) {
+    ///     bar();
+    /// } else if (c) {
+    ///     baz();
+    /// }
+    /// ```
+    ///
+    /// ```javascript
+    /// if (a || b) {
+    ///    foo();
+    /// } else if (c) {
+    ///    bar();
+    /// }
+    /// ```
+    ///
+    /// ```javascript
+    /// if (n === 1) {
+    ///     foo();
+    /// } else if (n === 2) {
+    ///     bar();
+    /// } else if (n === 3) {
+    ///     baz();
+    /// } else if (n === 4) {
+    ///     quux();
+    /// } else if (n === 5) {
+    ///     quuux();
+    /// }
+    /// ```
     NoDupeElseIf,
+    eslint,
     correctness
 );
 
@@ -55,11 +108,15 @@ impl Rule for NoDupeElseIf {
     fn run<'a>(&self, node: &AstNode<'a>, ctx: &LintContext<'a>) {
         // if (a) {} else if (a) {}
         //                ^^ get this if statement
-        let AstKind::IfStatement(if_stmt) = node.kind() else { return };
+        let AstKind::IfStatement(if_stmt) = node.kind() else {
+            return;
+        };
         let Some(AstKind::IfStatement(parent_if_stmt)) = ctx.nodes().parent_kind(node.id()) else {
             return;
         };
-        let Some(Statement::IfStatement(child_if_stmt)) = &parent_if_stmt.alternate else { return };
+        let Some(Statement::IfStatement(child_if_stmt)) = &parent_if_stmt.alternate else {
+            return;
+        };
         if child_if_stmt.span != if_stmt.span {
             return;
         }
@@ -79,12 +136,11 @@ impl Rule for NoDupeElseIf {
 
         let mut current_node = node;
         while let Some(parent_node) = ctx.nodes().parent_node(current_node.id()) {
-            let AstKind::IfStatement(stmt) = parent_node.kind() else { break };
+            let AstKind::IfStatement(stmt) = parent_node.kind() else {
+                break;
+            };
 
-            if !stmt
-                .alternate
-                .as_ref()
-                .is_some_and(|stmt| stmt.span() == current_node.kind().span())
+            if stmt.alternate.as_ref().is_none_or(|stmt| stmt.span() != current_node.kind().span())
             {
                 break;
             }
@@ -109,7 +165,7 @@ impl Rule for NoDupeElseIf {
                 .collect();
 
             if list_to_check.iter().any(Vec::is_empty) {
-                ctx.diagnostic(NoDupeElseIfDiagnostic(if_stmt.test.span(), stmt.test.span()));
+                ctx.diagnostic(no_dupe_else_if_diagnostic(if_stmt.test.span(), stmt.test.span()));
                 break;
             }
         }
@@ -155,7 +211,7 @@ fn is_equal<'a, 'b>(a: &'a Expression<'b>, b: &'a Expression<'b>) -> bool {
                 || (is_equal(&a.left, &b.right) && is_equal(&a.right, &b.left))
         }
 
-        (a, b) => calculate_hash(a) == calculate_hash(b),
+        (a, b) => a.content_eq(b),
     }
 }
 
@@ -258,5 +314,5 @@ fn test() {
         ("if (a && a) {} else if (a) {}", None),
     ];
 
-    Tester::new(NoDupeElseIf::NAME, pass, fail).test_and_snapshot();
+    Tester::new(NoDupeElseIf::NAME, NoDupeElseIf::PLUGIN, pass, fail).test_and_snapshot();
 }

@@ -1,17 +1,13 @@
 use oxc_ast::AstKind;
-use oxc_diagnostics::{
-    miette::{self, Diagnostic},
-    thiserror::Error,
-};
+use oxc_diagnostics::OxcDiagnostic;
 use oxc_macros::declare_oxc_lint;
-use oxc_span::{Atom, Span};
+use oxc_span::Span;
 
-use crate::{context::LintContext, fixer::Fix, rule::Rule};
+use crate::{context::LintContext, rule::Rule};
 
-#[derive(Debug, Error, Diagnostic)]
-#[error("eslint(no-unused-labels): Disallow unused labels")]
-#[diagnostic(severity(warning), help("'{0}:' is defined but never used."))]
-struct NoUnusedLabelsDiagnostic(Atom, #[label] pub Span);
+fn no_unused_labels_diagnostic(label_name: &str, span: Span) -> OxcDiagnostic {
+    OxcDiagnostic::warn(format!("'{label_name}:' is defined but never used.")).with_label(span)
+}
 
 #[derive(Debug, Default, Clone)]
 pub struct NoUnusedLabels;
@@ -37,22 +33,27 @@ declare_oxc_lint!(
     /// }
     /// ```
     NoUnusedLabels,
-    correctness
+    eslint,
+    correctness,
+    fix
 );
 
 impl Rule for NoUnusedLabels {
     fn run_once(&self, ctx: &LintContext) {
         for id in ctx.semantic().unused_labels() {
             let node = ctx.semantic().nodes().get_node(*id);
-            if let AstKind::LabeledStatement(stmt) = node.kind() {
-                // TODO: Ignore fix where comments exist between label and statement
-                // e.g. A: /* Comment */ function foo(){}
-                ctx.diagnostic_with_fix(
-                    NoUnusedLabelsDiagnostic(stmt.label.name.clone(), stmt.label.span),
-                    || Fix::delete(stmt.label.span),
-                );
-            }
+            let AstKind::LabeledStatement(stmt) = node.kind() else {
+                continue;
+            };
+            ctx.diagnostic_with_fix(
+                no_unused_labels_diagnostic(stmt.label.name.as_str(), stmt.label.span),
+                |fixer| fixer.replace_with(stmt, &stmt.body),
+            );
         }
+    }
+
+    fn should_run(&self, ctx: &crate::context::ContextHost) -> bool {
+        ctx.file_path().extension().is_some_and(|ext| ext != "svelte")
     }
 }
 
@@ -84,6 +85,18 @@ fn test() {
         ("A: /* comment */ foo", None),
         ("A /* comment */: foo", None),
     ];
+    let fix = vec![
+        ("A: var foo = 0;", "var foo = 0;", None),
+        ("A: /* comment */ foo", "foo", None),
+        ("A /* comment */: foo", "foo", None),
+        (
+            "A: for (var i = 0; i < 10; ++i) { B: break A; }",
+            "A: for (var i = 0; i < 10; ++i) { break A; }",
+            None,
+        ),
+    ];
 
-    Tester::new(NoUnusedLabels::NAME, pass, fail).test_and_snapshot();
+    Tester::new(NoUnusedLabels::NAME, NoUnusedLabels::PLUGIN, pass, fail)
+        .expect_fix(fix)
+        .test_and_snapshot();
 }

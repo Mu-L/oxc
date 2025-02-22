@@ -1,22 +1,19 @@
 use oxc_ast::AstKind;
-use oxc_diagnostics::{
-    miette::{self, Diagnostic},
-    thiserror::Error,
-};
+use oxc_diagnostics::OxcDiagnostic;
 use oxc_macros::declare_oxc_lint;
 use oxc_span::{GetSpan, Span};
 
-use crate::{context::LintContext, rule::Rule, AstNode};
+use crate::{AstNode, context::LintContext, rule::Rule};
 
-#[derive(Debug, Error, Diagnostic)]
-#[error(
-    "eslint(no-prototype-builtins): do not access Object.prototype method {0:?} from target object"
-)]
-#[diagnostic(
-    severity(warning),
-    help("to avoid prototype pollution, use `Object.prototype.{0}.call` instead")
-)]
-struct NoPrototypeBuiltinsDiagnostic(String, #[label] pub Span);
+fn no_prototype_builtins_diagnostic(method_name: &str, span: Span) -> OxcDiagnostic {
+    OxcDiagnostic::warn(format!(
+        "do not access Object.prototype method {method_name:?} from target object"
+    ))
+    .with_help(format!(
+        "to avoid prototype pollution, use `Object.prototype.{method_name}.call` instead"
+    ))
+    .with_label(span)
+}
 
 #[derive(Debug, Default, Clone)]
 pub struct NoPrototypeBuiltins;
@@ -44,6 +41,7 @@ declare_oxc_lint!(
     /// var barIsEnumerable = foo.propertyIsEnumerable("bar");
     /// ```
     NoPrototypeBuiltins,
+    eslint,
     pedantic
 );
 
@@ -51,14 +49,17 @@ const DISALLOWED_PROPS: &[&str; 3] = &["hasOwnProperty", "isPrototypeOf", "prope
 
 impl Rule for NoPrototypeBuiltins {
     fn run<'a>(&self, node: &AstNode<'a>, ctx: &LintContext<'a>) {
-        let AstKind::CallExpression(expr) = node.kind() else { return };
-        let Some(member_expr) = expr.callee.get_member_expr() else { return };
-        let Some(prop_name) = member_expr.static_property_name() else { return };
+        let AstKind::CallExpression(expr) = node.kind() else {
+            return;
+        };
+        let Some(member_expr) = expr.callee.get_member_expr() else {
+            return;
+        };
+        let Some(prop_name) = member_expr.static_property_name() else {
+            return;
+        };
         if DISALLOWED_PROPS.contains(&prop_name) {
-            ctx.diagnostic(NoPrototypeBuiltinsDiagnostic(
-                prop_name.to_string(),
-                member_expr.span(),
-            ));
+            ctx.diagnostic(no_prototype_builtins_diagnostic(prop_name, member_expr.span()));
         }
     }
 }
@@ -112,5 +113,6 @@ fn test() {
         "(foo?.[`hasOwnProperty`])('bar')",
     ];
 
-    Tester::new_without_config(NoPrototypeBuiltins::NAME, pass, fail).test_and_snapshot();
+    Tester::new(NoPrototypeBuiltins::NAME, NoPrototypeBuiltins::PLUGIN, pass, fail)
+        .test_and_snapshot();
 }

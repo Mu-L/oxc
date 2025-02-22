@@ -7,27 +7,23 @@ use oxc_syntax::{
 
 use crate::lexer::Kind;
 
-pub fn kind_to_precedence(kind: Kind) -> Option<Precedence> {
+pub fn kind_to_precedence(kind: Kind, is_typescript: bool) -> Option<Precedence> {
     match kind {
-        Kind::Question2 => Some(Precedence::Coalesce),
+        Kind::Question2 => Some(Precedence::NullishCoalescing),
         Kind::Pipe2 => Some(Precedence::LogicalOr),
         Kind::Amp2 => Some(Precedence::LogicalAnd),
         Kind::Pipe => Some(Precedence::BitwiseOr),
         Kind::Caret => Some(Precedence::BitwiseXor),
         Kind::Amp => Some(Precedence::BitwiseAnd),
-        Kind::Eq2 | Kind::Eq3 | Kind::Neq | Kind::Neq2 => Some(Precedence::Equality),
-        Kind::LAngle
-        | Kind::RAngle
-        | Kind::LtEq
-        | Kind::GtEq
-        | Kind::Instanceof
-        | Kind::In
-        | Kind::As
-        | Kind::Satisfies => Some(Precedence::Relational),
+        Kind::Eq2 | Kind::Eq3 | Kind::Neq | Kind::Neq2 => Some(Precedence::Equals),
+        Kind::LAngle | Kind::RAngle | Kind::LtEq | Kind::GtEq | Kind::Instanceof | Kind::In => {
+            Some(Precedence::Compare)
+        }
         Kind::ShiftLeft | Kind::ShiftRight | Kind::ShiftRight3 => Some(Precedence::Shift),
         Kind::Plus | Kind::Minus => Some(Precedence::Add),
         Kind::Star | Kind::Slash | Kind::Percent => Some(Precedence::Multiply),
-        Kind::Star2 => Some(Precedence::Exponential),
+        Kind::Star2 => Some(Precedence::Exponentiation),
+        Kind::As | Kind::Satisfies if is_typescript => Some(Precedence::Compare),
         _ => None,
     }
 }

@@ -1,27 +1,19 @@
 use oxc_ast::{
-    ast::{BinaryExpression, Expression},
     AstKind,
+    ast::{BinaryExpression, Expression},
 };
-use oxc_diagnostics::{
-    miette::{self, Diagnostic},
-    thiserror::{self, Error},
-};
-use oxc_formatter::Gen;
+use oxc_diagnostics::OxcDiagnostic;
 use oxc_macros::declare_oxc_lint;
 use oxc_span::{GetSpan, Span};
 use oxc_syntax::operator::{BinaryOperator, UnaryOperator};
 
-use crate::{context::LintContext, fixer::Fix, rule::Rule, AstNode};
+use crate::{AstNode, context::LintContext, fixer::RuleFixer, rule::Rule};
 
-#[derive(Debug, Error, Diagnostic)]
-#[error("Unexpected logical not in the left hand side of '{0}' operator")]
-#[diagnostic(
-    severity(warning),
-    help(
-        "use parenthesis to express the negation of the whole boolean expression, as '!' binds more closely than '{0}'"
-    )
-)]
-struct NoUnsafeNegationDiagnostic(&'static str, #[label] pub Span);
+fn no_unsafe_negation_diagnostic(operator: &str, span: Span) -> OxcDiagnostic {
+    OxcDiagnostic::warn(format!("Unexpected logical not in the left hand side of '{operator}' operator"))
+        .with_help(format!("use parenthesis to express the negation of the whole boolean expression, as '!' binds more closely than '{operator}'"))
+        .with_label(span)
+}
 
 #[derive(Debug, Default, Clone)]
 pub struct NoUnsafeNegation {
@@ -47,7 +39,9 @@ declare_oxc_lint!(
     /// }
     /// ```
     NoUnsafeNegation,
-    correctness
+    eslint,
+    correctness,
+    fix
 );
 
 impl Rule for NoUnsafeNegation {
@@ -82,24 +76,26 @@ impl NoUnsafeNegation {
 
     /// Precondition:
     /// expr.left is `UnaryExpression` whose operator is '!'
-    fn report_with_fix(expr: &BinaryExpression, ctx: &LintContext<'_>) {
+    fn report_with_fix<'a>(expr: &BinaryExpression, ctx: &LintContext<'a>) {
         // Diagnostic points at the unexpected negation
-        let diagnostic = NoUnsafeNegationDiagnostic(expr.operator.as_str(), expr.left.span());
+        let diagnostic = no_unsafe_negation_diagnostic(expr.operator.as_str(), expr.left.span());
 
-        let fix_producer = || {
+        let fix_producer = |fixer: RuleFixer<'_, 'a>| {
             // modify `!a instance of B` to `!(a instanceof B)`
             let modified_code = {
-                let mut formatter = ctx.formatter();
-                formatter.print(b'!');
+                let mut codegen = fixer.codegen();
+                codegen.print_ascii_byte(b'!');
                 let Expression::UnaryExpression(left) = &expr.left else { unreachable!() };
-                formatter.print(b'(');
-                left.argument.gen(&mut formatter);
-                expr.operator.gen(&mut formatter);
-                expr.right.gen(&mut formatter);
-                formatter.print(b')');
-                formatter.into_code()
+                codegen.print_ascii_byte(b'(');
+                codegen.print_expression(&left.argument);
+                codegen.print_ascii_byte(b' ');
+                codegen.print_str(expr.operator.as_str());
+                codegen.print_ascii_byte(b' ');
+                codegen.print_expression(&expr.right);
+                codegen.print_ascii_byte(b')');
+                codegen.into_source_text()
             };
-            Fix::new(modified_code, expr.span)
+            fixer.replace(expr.span, modified_code)
         };
 
         ctx.diagnostic_with_fix(diagnostic, fix_producer);
@@ -145,5 +141,24 @@ fn test() {
         ("! a <= b", Some(serde_json::json!([{ "enforceForOrderingRelations": true }]))),
     ];
 
-    Tester::new(NoUnsafeNegation::NAME, pass, fail).test_and_snapshot();
+    let fix = vec![
+        ("!a in b", "!(a in b)"),
+        ("(!a in b)", "(!(a in b))"),
+        ("!(a) in b", "!(a in b)"),
+        ("!a instanceof b", "!(a instanceof b)"),
+        ("(!a instanceof b)", "(!(a instanceof b))"),
+        ("!(a) instanceof b", "!(a instanceof b)"),
+        // FIXME: I think these should be failing. I encountered these while
+        // making sure all fix-reporting rules have fix test cases. Debugging +
+        // fixing this is out of scope for this PR.
+        // ("if (! a < b) {}", "if (!(a < b)) {}"),
+        // ("while (! a > b) {}", "while (!(a > b)) {}"),
+        // ("foo = ! a <= b;", "foo = !(a <= b);"),
+        // ("foo = ! a >= b;", "foo = !(a >= b);"),
+        // ("!a <= b", "!(a <= b)"),
+    ];
+
+    Tester::new(NoUnsafeNegation::NAME, NoUnsafeNegation::PLUGIN, pass, fail)
+        .expect_fix(fix)
+        .test_and_snapshot();
 }

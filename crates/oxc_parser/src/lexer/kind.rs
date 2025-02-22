@@ -2,21 +2,21 @@
 
 use std::fmt;
 
+/// Lexer token kind
+///
+/// Exported for other oxc crates to use. You generally don't need to use this directly.
 #[derive(Debug, Default, Clone, Copy, Eq, PartialEq)]
 #[non_exhaustive]
 pub enum Kind {
     Undetermined,
     #[default]
     Eof,
-    WhiteSpace,
-    NewLine,
-    Comment,
-    MultiLineComment,
+    Skip, // Whitespace, line breaks, comments
     // 12.5 Hashbang Comments
     HashbangComment,
-    // 12.6 identifier
+    // 12.7.1 identifier
     Ident,
-    // 12.6.2 keyword
+    // 12.7.2 keyword
     Await,
     Break,
     Case,
@@ -58,8 +58,10 @@ pub enum Kind {
     Meta, // import.meta
     Of,
     Set,
-    Target, // new.target
-    Accessor,
+    Target,   // new.target
+    Accessor, // keyword from https://github.com/tc39/proposal-decorators
+    Source,   // import.source https://github.com/tc39/proposal-source-phase-imports
+    Defer,    // import.defer https://github.com/tc39/proposal-defer-import-eval
     // TypeScript Contextual Keywords
     Abstract,
     As,
@@ -79,7 +81,7 @@ pub enum Kind {
     Out,
     Readonly,
     Require,
-    Number,
+    Number, // the "number" keyword for TypeScript
     Object,
     Satisfies,
     String, // the "string" keyword for TypeScript
@@ -90,7 +92,7 @@ pub enum Kind {
     Using,
     Unknown,
     Global,
-    BigInt,
+    BigInt, // the "bigint" keyword for TypeScript
     Override,
     // Future keywords (strict mode reserved words)
     Implements,
@@ -102,12 +104,12 @@ pub enum Kind {
     Public,
     Static,
     Yield,
-    // 12.7 punctuators
+    // 12.8 punctuators
     Amp, // &
     Amp2,
     Amp2Eq,
     AmpEq,
-    Bang,
+    Bang, // !
     Caret,
     CaretEq,
     Colon,
@@ -161,12 +163,12 @@ pub enum Kind {
     Tilde,
     // arrow function
     Arrow,
-    // 12.8.1 Null Literals
+    // 12.9.1 Null Literals
     Null,
-    // 12.8.2 Boolean Literals
+    // 12.9.2 Boolean Literals
     True,
     False,
-    // 12.8.3 Numeric Literals
+    // 12.9.3 Numeric Literals
     Decimal,
     Float,
     Binary,
@@ -176,12 +178,12 @@ pub enum Kind {
     PositiveExponential,
     // for `1e-10`
     NegativeExponential,
-    // 12.8.4 String Literals
+    // 12.9.4 String Literals
     /// String Type
     Str,
-    // 12.8.5 Regular Expression Literals
+    // 12.9.5 Regular Expression Literals
     RegExp,
-    // 12.8.6 Template Literal
+    // 12.9.6 Template Literal
     NoSubstitutionTemplate,
     TemplateHead,
     TemplateMiddle,
@@ -194,14 +196,16 @@ pub enum Kind {
     At,
 }
 
-#[allow(clippy::enum_glob_use)]
-use self::Kind::*;
+#[allow(clippy::enum_glob_use, clippy::allow_attributes)]
+use Kind::*;
 
 impl Kind {
+    #[inline]
     pub fn is_eof(self) -> bool {
         matches!(self, Eof)
     }
 
+    #[inline]
     pub fn is_number(self) -> bool {
         matches!(
             self,
@@ -209,45 +213,55 @@ impl Kind {
         )
     }
 
-    pub fn matches_number_char(self, c: char) -> bool {
+    #[inline] // Inline into `read_non_decimal` - see comment there as to why
+    pub fn matches_number_byte(self, b: u8) -> bool {
         match self {
-            Decimal => c.is_ascii_digit(),
-            Binary => matches!(c, '0'..='1'),
-            Octal => matches!(c, '0'..='7'),
-            Hex => c.is_ascii_hexdigit(),
+            Decimal => b.is_ascii_digit(),
+            Binary => matches!(b, b'0'..=b'1'),
+            Octal => matches!(b, b'0'..=b'7'),
+            Hex => b.is_ascii_hexdigit(),
             _ => unreachable!(),
         }
     }
 
     /// [Identifiers](https://tc39.es/ecma262/#sec-identifiers)
     /// `IdentifierReference`
+    #[inline]
     pub fn is_identifier_reference(self, r#yield: bool, r#await: bool) -> bool {
         self.is_identifier() || (!r#yield && self == Yield) || (!r#await && self == Await)
     }
 
     /// `BindingIdentifier`
+    #[inline]
     pub fn is_binding_identifier(self) -> bool {
         self.is_identifier() || matches!(self, Yield | Await)
     }
 
     /// `LabelIdentifier`
+    #[inline]
     pub fn is_label_identifier(self, r#yield: bool, r#await: bool) -> bool {
         self.is_identifier() || (!r#yield && self == Yield) || (!r#await && self == Await)
     }
 
     /// Identifier
     /// `IdentifierName` but not `ReservedWord`
+    #[inline]
     pub fn is_identifier(self) -> bool {
         self.is_identifier_name() && !self.is_reserved_keyword()
     }
 
     /// `IdentifierName`
+    #[inline]
     pub fn is_identifier_name(self) -> bool {
         matches!(self, Ident) || self.is_all_keyword()
     }
 
-    /// Check the succeeding token of a `let` keyword
-    // let { a, b } = c, let [a, b] = c, let ident
+    /// Check the succeeding token of a `let` keyword.
+    ///
+    /// ```javascript
+    /// let { a, b } = c, let [a, b] = c, let ident
+    /// ```
+    #[inline]
     pub fn is_after_let(self) -> bool {
         self != Self::In && (matches!(self, LCurly | LBrack | Ident) || self.is_all_keyword())
     }
@@ -258,10 +272,12 @@ impl Kind {
     ///     `BooleanLiteral`
     ///     `NumericLiteral`
     ///     `StringLiteral`
+    #[inline]
     pub fn is_literal(self) -> bool {
         matches!(self, Null | True | False | Str | RegExp) || self.is_number()
     }
 
+    #[inline]
     pub fn is_after_await_or_yield(self) -> bool {
         !self.is_binary_operator() && (self.is_literal() || self.is_identifier_name())
     }
@@ -271,10 +287,19 @@ impl Kind {
     ///     `IdentifierName`
     ///     `StringLiteral`
     ///     `NumericLiteral`
+    #[inline]
     pub fn is_literal_property_name(self) -> bool {
         self.is_identifier_name() || self == Str || self.is_number()
     }
 
+    #[inline]
+    pub fn is_identifier_or_keyword(self) -> bool {
+        self.is_literal_property_name()
+            || matches!(self, Self::PrivateIdentifier)
+            || self.is_all_keyword()
+    }
+
+    #[inline]
     pub fn is_variable_declaration(self) -> bool {
         matches!(self, Var | Let | Const)
     }
@@ -286,11 +311,13 @@ impl Kind {
     /// `PropertyName`[Yield, Await] :
     ///   `LiteralPropertyName`
     ///   `ComputedPropertyName`[?Yield, ?Await]
+    #[inline]
     pub fn is_class_element_name_start(self) -> bool {
         self.is_literal_property_name() || matches!(self, LBrack | PrivateIdentifier)
     }
 
     #[rustfmt::skip]
+    #[inline]
     pub fn is_assignment_operator(self) -> bool {
         matches!(self, Eq | PlusEq | MinusEq | StarEq | SlashEq | PercentEq | ShiftLeftEq | ShiftRightEq
             | ShiftRight3Eq | Pipe2Eq | Amp2Eq | PipeEq | CaretEq | AmpEq | Question2Eq
@@ -298,25 +325,30 @@ impl Kind {
     }
 
     #[rustfmt::skip]
+    #[inline]
     pub fn is_binary_operator(self) -> bool {
         matches!(self, Eq2 | Neq | Eq3 | Neq2 | LAngle | LtEq | RAngle | GtEq | ShiftLeft | ShiftRight
             | ShiftRight3 | Plus | Minus | Star | Slash | Percent | Pipe | Caret | Amp | In
             | Instanceof | Star2)
     }
 
+    #[inline]
     pub fn is_logical_operator(self) -> bool {
         matches!(self, Pipe2 | Amp2 | Question2)
     }
 
+    #[inline]
     pub fn is_unary_operator(self) -> bool {
         matches!(self, Minus | Plus | Bang | Tilde | Typeof | Void | Delete)
     }
 
+    #[inline]
     pub fn is_update_operator(self) -> bool {
         matches!(self, Plus2 | Minus2)
     }
 
     /// [Keywords and Reserved Words](https://tc39.es/ecma262/#sec-keywords-and-reserved-words)
+    #[inline]
     pub fn is_all_keyword(self) -> bool {
         self.is_reserved_keyword()
             || self.is_contextual_keyword()
@@ -325,6 +357,7 @@ impl Kind {
     }
 
     #[rustfmt::skip]
+    #[inline]
     pub fn is_reserved_keyword(self) -> bool {
         matches!(self, Await | Break | Case | Catch | Class | Const | Continue | Debugger | Default
             | Delete | Do | Else | Enum | Export | Extends | False | Finally | For | Function | If
@@ -333,41 +366,43 @@ impl Kind {
     }
 
     #[rustfmt::skip]
+    #[inline]
     pub fn is_strict_mode_contextual_keyword(self) -> bool {
         matches!(self, Let | Static | Implements | Interface | Package | Private | Protected | Public)
     }
 
     #[rustfmt::skip]
+    #[inline]
     pub fn is_contextual_keyword(self) -> bool {
         matches!(self, Async | From | Get | Meta | Of | Set | Target | Accessor | Abstract | As | Asserts
             | Assert | Any | Boolean | Constructor | Declare | Infer | Intrinsic | Is | KeyOf | Module
             | Namespace | Never | Out | Readonly | Require | Number | Object | Satisfies | String
-            | Symbol | Type | Undefined | Unique | Unknown | Using | Global | BigInt | Override)
+            | Symbol | Type | Undefined | Unique | Unknown | Using | Global | BigInt | Override
+            | Source | Defer
+            )
     }
 
     #[rustfmt::skip]
+    #[inline]
     pub fn is_future_reserved_keyword(self) -> bool {
         matches!(self, Implements | Interface | Package | Private | Protected | Public | Static)
     }
 
-    #[rustfmt::skip]
-    pub fn is_at_expression(self) -> bool {
-        self.is_unary_operator()
-            || self.is_update_operator()
-            || self.is_reserved_keyword()
-            || self.is_literal()
-            || matches!(self, Neq | LParen | LBrack | LCurly | LAngle | Dot3
-                | Slash | SlashEq | TemplateHead | NoSubstitutionTemplate | PrivateIdentifier | Ident | Async)
-    }
-
+    #[inline]
     pub fn is_template_start_of_tagged_template(self) -> bool {
         matches!(self, NoSubstitutionTemplate | TemplateHead)
     }
 
     #[rustfmt::skip]
+    #[inline]
     pub fn is_modifier_kind(self) -> bool {
         matches!(self, Abstract | Accessor | Async | Const | Declare | Default
           | Export | In | Out | Public | Private | Protected | Readonly | Static | Override)
+    }
+
+    #[inline]
+    pub fn is_binding_identifier_or_private_identifier_or_pattern(self) -> bool {
+        matches!(self, LCurly | LBrack | PrivateIdentifier) || self.is_binding_identifier()
     }
 
     pub fn match_keyword(s: &str) -> Self {
@@ -421,8 +456,10 @@ impl Kind {
             "never" => Never,
             "super" => Super,
             "throw" => Throw,
+            "using" => Using,
             "while" => While,
             "yield" => Yield,
+            "defer" => Defer,
 
             "assert" => Assert,
             "bigint" => BigInt,
@@ -442,7 +479,7 @@ impl Kind {
             "target" => Target,
             "typeof" => Typeof,
             "unique" => Unique,
-            "using" => Using,
+            "source" => Source,
 
             "asserts" => Asserts,
             "boolean" => Boolean,
@@ -482,11 +519,8 @@ impl Kind {
         match self {
             Undetermined => "Unknown",
             Eof => "EOF",
-            NewLine => "\n",
-            Comment => "//",
-            MultiLineComment => "/** */",
+            Skip => "Skipped",
             HashbangComment => "#!",
-            WhiteSpace => " ",
             Ident => "Identifier",
             Await => "await",
             Break => "break",
@@ -538,6 +572,8 @@ impl Kind {
             Override => "override",
             Type => "type",
             Target => "target",
+            Source => "source",
+            Defer => "defer",
             Implements => "implements",
             Interface => "interface",
             Package => "package",
@@ -644,15 +680,6 @@ impl Kind {
             Global => "global",
             BigInt => "bigint",
         }
-    }
-
-    #[rustfmt::skip]
-    pub fn can_follow_type_arguments_in_expr(self) -> bool {
-        matches!(self, Self::LParen | Self::NoSubstitutionTemplate | Self::TemplateHead
-            | Self::Comma | Self::Dot | Self::QuestionDot | Self::RParen | Self::RBrack
-            | Self::Colon | Self::Semicolon | Self::Question | Self::Eq3 | Self::Eq2
-            | Self::Neq | Self::Neq2 | Self::Amp2 | Self::Pipe2 | Self::Question2
-            | Self::Caret | Self::Amp | Self::Pipe | Self::RCurly | Self::Eof)
     }
 }
 

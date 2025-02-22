@@ -1,24 +1,22 @@
 use oxc_ast::{
-    ast::{Expression, IdentifierReference, MemberExpression},
     AstKind,
+    ast::{Expression, IdentifierReference, MemberExpression, match_member_expression},
 };
-use oxc_diagnostics::{
-    miette::{self, Diagnostic},
-    thiserror::Error,
-};
+use oxc_diagnostics::OxcDiagnostic;
 use oxc_macros::declare_oxc_lint;
 use oxc_semantic::{AstNode, ScopeId};
-use oxc_span::{Atom, Span};
+use oxc_span::Span;
 
 use crate::{context::LintContext, rule::Rule};
 
 const GLOBAL_THIS: &str = "globalThis";
 const NON_CALLABLE_GLOBALS: [&str; 5] = ["Atomics", "Intl", "JSON", "Math", "Reflect"];
 
-#[derive(Debug, Error, Diagnostic)]
-#[error("eslint(no-obj-calls): Disallow calling some global objects as functions")]
-#[diagnostic(severity(warning), help("{0} is not a function."))]
-struct NoObjCallsDiagnostic(Atom, #[label] pub Span);
+fn no_obj_calls_diagnostic(obj_name: &str, span: Span) -> OxcDiagnostic {
+    OxcDiagnostic::warn(format!("`{obj_name}` is not a function and cannot be called"))
+        .with_help("This call will throw a TypeError at runtime.")
+        .with_label(span)
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NoObjCalls;
@@ -38,8 +36,9 @@ declare_oxc_lint! {
     /// Calling them as functions will usually result in a TypeError being thrown.
     ///
     /// ### Example
+    ///
+    /// Examples of **incorrect** code for this rule:
     /// ```javascript
-    /// // Bad
     /// let math = Math();
     /// let newMath = new Math();
     ///
@@ -54,75 +53,77 @@ declare_oxc_lint! {
     ///
     /// let reflect = Reflect();
     /// let newReflect = new Reflect();
+    /// ```
     ///
-    /// // Good
+    /// Examples of **correct** code for this rule:
+    /// ```javascript
     /// let area = r => 2 * Math.PI * r * r;
     /// let object = JSON.parse("{}");
     /// let first = Atomics.load(sharedArray, 0);
     /// let segmenterFrom = Intl.Segmenter("fr", { granularity: "word" });
     /// ```
     NoObjCalls,
+    eslint,
     correctness,
 }
 
-fn is_global_obj(str: &Atom) -> bool {
-    NON_CALLABLE_GLOBALS.iter().any(|&n| str == &n)
+fn is_global_obj(s: &str) -> bool {
+    NON_CALLABLE_GLOBALS.contains(&s)
 }
 
-fn global_this_member(expr: &oxc_allocator::Box<'_, MemberExpression<'_>>) -> Option<Atom> {
-    if expr.object().is_specific_id(GLOBAL_THIS) {
-        expr.static_property_name().map(std::convert::Into::into)
-    } else {
-        None
-    }
+fn global_this_member<'a>(expr: &'a MemberExpression<'_>) -> Option<&'a str> {
+    if expr.object().is_specific_id(GLOBAL_THIS) { expr.static_property_name() } else { None }
 }
 
 fn resolve_global_binding<'a, 'b: 'a>(
-    ident: &oxc_allocator::Box<'a, IdentifierReference>,
+    ident: &'a oxc_allocator::Box<'a, IdentifierReference<'a>>,
     scope_id: ScopeId,
     ctx: &LintContext<'a>,
-) -> Option<Atom> {
-    if ctx.semantic().is_reference_to_global_variable(ident) {
-        Some(ident.name.clone())
-    } else {
-        let scope = ctx.scopes();
-        let nodes = ctx.nodes();
-        let symbols = ctx.symbols();
-        scope.ancestors(scope_id).find_map(|id| scope.get_binding(id, &ident.name)).map_or_else(
-            || {
-                panic!(
-                    "No binding id found for {}, but this IdentifierReference
+) -> Option<&'a str> {
+    let scope = ctx.scopes();
+    let nodes = ctx.nodes();
+    let symbols = ctx.symbols();
+
+    if ctx.is_reference_to_global_variable(ident) {
+        return Some(ident.name.as_str());
+    }
+
+    let Some(binding_id) = scope.find_binding(scope_id, &ident.name) else {
+        // Panic in debug builds, but fail gracefully in release builds.
+        debug_assert!(
+            false,
+            "No binding id found for {}, but this IdentifierReference
                 is not a global",
-                    &ident.name
-                );
-            },
-            |binding_id| {
-                let decl = nodes.get_node(symbols.get_declaration(binding_id));
-                let decl_scope = decl.scope_id();
-                match decl.kind() {
-                    AstKind::VariableDeclarator(parent_decl) => {
-                        match &parent_decl.init {
-                            // handles "let a = JSON; let b = a; a();"
-                            Some(Expression::Identifier(parent_ident)) => {
-                                resolve_global_binding(parent_ident, decl_scope, ctx)
-                            }
-                            // handles "let a = globalThis.JSON; let b = a; a();"
-                            Some(Expression::MemberExpression(parent_expr)) => {
-                                global_this_member(parent_expr)
-                            }
-                            _ => None,
-                        }
-                    }
-                    _ => None,
+            &ident.name
+        );
+        return None;
+    };
+
+    let decl = nodes.get_node(symbols.get_declaration(binding_id));
+    match decl.kind() {
+        AstKind::VariableDeclarator(parent_decl) => {
+            if !parent_decl.id.kind.is_binding_identifier() {
+                return Some(ident.name.as_str());
+            }
+            match &parent_decl.init {
+                // handles "let a = JSON; let b = a; a();"
+                Some(Expression::Identifier(parent_ident)) if parent_ident.name != ident.name => {
+                    let decl_scope = decl.scope_id();
+                    resolve_global_binding(parent_ident, decl_scope, ctx)
                 }
-            },
-        )
+                // handles "let a = globalThis.JSON; let b = a; a();"
+                Some(parent_expr) if parent_expr.is_member_expression() => {
+                    global_this_member(parent_expr.to_member_expression())
+                }
+                _ => None,
+            }
+        }
+        _ => None,
     }
 }
 
 impl Rule for NoObjCalls {
     fn run<'a>(&self, node: &AstNode<'a>, ctx: &LintContext<'a>) {
-        #[allow(clippy::needless_return)]
         let (callee, span) = match node.kind() {
             AstKind::NewExpression(expr) => (&expr.callee, expr.span),
             AstKind::CallExpression(expr) => (&expr.callee, expr.span),
@@ -135,17 +136,17 @@ impl Rule for NoObjCalls {
                 if let Some(top_level_reference) =
                     resolve_global_binding(ident, node.scope_id(), ctx)
                 {
-                    if is_global_obj(&top_level_reference) {
-                        ctx.diagnostic(NoObjCallsDiagnostic(ident.name.clone(), span));
+                    if is_global_obj(top_level_reference) {
+                        ctx.diagnostic(no_obj_calls_diagnostic(ident.name.as_str(), span));
                     }
                 }
             }
 
-            Expression::MemberExpression(expr) => {
+            match_member_expression!(Expression) => {
                 // handle new globalThis.Math(), globalThis.Math(), etc
-                if let Some(global_member) = global_this_member(expr) {
-                    if is_global_obj(&global_member) {
-                        ctx.diagnostic(NoObjCallsDiagnostic(global_member, span));
+                if let Some(global_member) = global_this_member(callee.to_member_expression()) {
+                    if is_global_obj(global_member) {
+                        ctx.diagnostic(no_obj_calls_diagnostic(global_member, span));
                     }
                 }
             }
@@ -159,14 +160,14 @@ impl Rule for NoObjCalls {
 #[test]
 fn test() {
     use crate::tester::Tester;
-    // see: https://github.com/eslint/eslint/blob/main/tests/lib/rules/no-obj-calls.js
+    // see: https://github.com/eslint/eslint/blob/v9.9.1/tests/lib/rules/no-obj-calls.js
 
     let pass = vec![
         ("const m = Math;", None),
         ("let m = foo.Math();", None),
         ("JSON.parse(\"{}\")", None),
         ("Math.PI * 2 * (r * r)", None),
-        ("bar.Atomic(foo)", None),
+        ("bar.Atomics(foo)", None),
         // reference test cases
         (
             "let j = JSON;
@@ -176,8 +177,16 @@ fn test() {
             }",
             None,
         ),
-        // https://github.com/web-infra-dev/oxc/pull/508#issuecomment-1618850742
+        // https://github.com/oxc-project/oxc/pull/508#issuecomment-1618850742
         ("{const Math = () => {}; {let obj = new Math();}}", None),
+        ("{const {parse} = JSON;parse('{}')}", None),
+        // https://github.com/oxc-project/oxc/issues/4389
+        (
+            r"
+        export const getConfig = getConfig;
+        getConfig();",
+            None,
+        ),
     ];
 
     let fail = vec![
@@ -196,12 +205,12 @@ fn test() {
         ("let obj = Intl();", None),
         ("let newObj = new Reflect();", None),
         ("let obj = Reflect();", None),
-        ("function() { JSON.parse(Atomics()) }", None),
+        ("function d() { JSON.parse(Atomics()) }", None),
         // reference test cases
         ("let j = JSON; j();", None),
         ("let a = JSON; let b = a; let c = b; b();", None),
         ("let m = globalThis.Math; new m();", None),
     ];
 
-    Tester::new(NoObjCalls::NAME, pass, fail).test_and_snapshot();
+    Tester::new(NoObjCalls::NAME, NoObjCalls::PLUGIN, pass, fail).test_and_snapshot();
 }
