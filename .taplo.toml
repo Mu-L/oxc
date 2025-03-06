@@ -1,5 +1,0 @@
-include = ["Cargo.toml", "crates/*/*.toml", "tasks/*/*.toml", "editor/*/*.toml"]
-
-[formatting]
-align_entries = true
-column_width = 120

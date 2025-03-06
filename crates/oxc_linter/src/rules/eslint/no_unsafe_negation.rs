@@ -1,53 +1,67 @@
-use oxc_ast::{
-    ast::{BinaryExpression, Expression},
-    AstKind,
-};
-use oxc_diagnostics::{
-    miette::{self, Diagnostic},
-    thiserror::{self, Error},
-};
-use oxc_formatter::Gen;
+use oxc_ast::{AstKind, ast::Expression};
+use oxc_diagnostics::OxcDiagnostic;
 use oxc_macros::declare_oxc_lint;
 use oxc_span::{GetSpan, Span};
-use oxc_syntax::operator::{BinaryOperator, UnaryOperator};
+use oxc_syntax::operator::UnaryOperator;
 
-use crate::{context::LintContext, fixer::Fix, rule::Rule, AstNode};
+use crate::{AstNode, context::LintContext, fixer::RuleFixer, rule::Rule};
 
-#[derive(Debug, Error, Diagnostic)]
-#[error("Unexpected logical not in the left hand side of '{0}' operator")]
-#[diagnostic(
-    severity(warning),
-    help(
-        "use parenthesis to express the negation of the whole boolean expression, as '!' binds more closely than '{0}'"
-    )
-)]
-struct NoUnsafeNegationDiagnostic(&'static str, #[label] pub Span);
+fn no_unsafe_negation_diagnostic(operator: &str, span: Span) -> OxcDiagnostic {
+    OxcDiagnostic::warn(format!("Unexpected negating the left operand of '{operator}' operator"))
+        .with_help(format!(
+            "Use `()` to negate the whole expression, as '!' binds more closely than '{operator}'"
+        ))
+        .with_label(span)
+}
 
 #[derive(Debug, Default, Clone)]
 pub struct NoUnsafeNegation {
-    /// true: disallow negation of the left-hand side of ordering relational operators
-    /// false: allow negation of the left-hand side of ordering relational operators (<, >, <=, >=)
     enforce_for_ordering_relations: bool,
 }
 
 declare_oxc_lint!(
     /// ### What it does
-    /// Disallow negating the left operand of relational operators
+    ///
+    /// Disallows negating the left operand of relational operators to prevent logical errors
+    /// caused by misunderstanding operator precedence or accidental use of negation.
     ///
     /// ### Why is this bad?
-    /// Just as developers might type -a + b when they mean -(a + b) for the negative of a sum,
-    /// they might type !key in object by mistake when they almost certainly mean !(key in object)
-    /// to test that a key is not in an object. !obj instanceof Ctor is similar.
     ///
-    /// ### Example
+    /// Negating the left operand of relational operators can result in unexpected behavior due to
+    /// operator precedence, leading to logical errors. For instance, `!a in b` may be interpreted
+    /// as `(!a) in b` instead of `!(a in b)`, which is not the intended logic.
+    ///
+    /// ### Examples
+    ///
+    /// Examples of **incorrect** code for this rule:
     /// ```javascript
-    /// if (!key in object) {
-    ///   //operator precedence makes it equivalent to (!key) in object
-    ///   //and type conversion makes it equivalent to (key ? "false" : "true") in object
-    /// }
+    /// if (!key in object) {}
+    ///
+    /// if (!obj instanceof Ctor) {}
     /// ```
+    ///
+    /// Examples of **correct** code for this rule:
+    /// ```javascript
+    /// if (!(key in object)) {}
+    ///
+    /// if (!(obj instanceof Ctor)) {}
+    /// ```
+    ///
+    /// ### Options
+    ///
+    /// #### enforceForOrderingRelations
+    ///
+    /// `{ type: boolean, default: false }`
+    ///
+    /// The `enforceForOrderingRelations` option determines whether negation is allowed
+    /// on the left-hand side of ordering relational operators (<, >, <=, >=).
+    ///
+    /// The purpose is to avoid expressions such as `!a < b` (which is equivalent to `(a ? 0 : 1) < b`)
+    /// when what is really intended is `!(a < b)`.
     NoUnsafeNegation,
-    correctness
+    eslint,
+    correctness,
+    fix
 );
 
 impl Rule for NoUnsafeNegation {
@@ -64,45 +78,33 @@ impl Rule for NoUnsafeNegation {
         let AstKind::BinaryExpression(expr) = node.kind() else {
             return;
         };
-        if self.should_check(expr.operator) {
+
+        let should_check = expr.operator.is_relational()
+            || (self.enforce_for_ordering_relations && expr.operator.is_compare());
+        if should_check {
             let Expression::UnaryExpression(left) = &expr.left else {
                 return;
             };
             if left.operator == UnaryOperator::LogicalNot {
-                Self::report_with_fix(expr, ctx);
+                // Diagnostic points at the unexpected negation
+                let diagnostic =
+                    no_unsafe_negation_diagnostic(expr.operator.as_str(), expr.left.span());
+
+                let fix_producer = |fixer: RuleFixer<'_, 'a>| {
+                    // modify `!a instance of B` to `!(a instanceof B)`
+                    let modified_code = {
+                        let left = ctx.source_range(left.argument.span());
+                        let operator = expr.operator.as_str();
+                        let right = ctx.source_range(expr.right.span());
+
+                        format!("!({left} {operator} {right})")
+                    };
+                    fixer.replace(expr.span, modified_code)
+                };
+
+                ctx.diagnostic_with_fix(diagnostic, fix_producer);
             }
         }
-    }
-}
-
-impl NoUnsafeNegation {
-    fn should_check(&self, op: BinaryOperator) -> bool {
-        op.is_relational() || (self.enforce_for_ordering_relations && op.is_compare())
-    }
-
-    /// Precondition:
-    /// expr.left is `UnaryExpression` whose operator is '!'
-    fn report_with_fix(expr: &BinaryExpression, ctx: &LintContext<'_>) {
-        // Diagnostic points at the unexpected negation
-        let diagnostic = NoUnsafeNegationDiagnostic(expr.operator.as_str(), expr.left.span());
-
-        let fix_producer = || {
-            // modify `!a instance of B` to `!(a instanceof B)`
-            let modified_code = {
-                let mut formatter = ctx.formatter();
-                formatter.print(b'!');
-                let Expression::UnaryExpression(left) = &expr.left else { unreachable!() };
-                formatter.print(b'(');
-                left.argument.gen(&mut formatter);
-                expr.operator.gen(&mut formatter);
-                expr.right.gen(&mut formatter);
-                formatter.print(b')');
-                formatter.into_code()
-            };
-            Fix::new(modified_code, expr.span)
-        };
-
-        ctx.diagnostic_with_fix(diagnostic, fix_producer);
     }
 }
 
@@ -138,6 +140,7 @@ fn test() {
         ("!a instanceof b", None),
         ("(!a instanceof b)", None),
         ("!(a) instanceof b", None),
+        ("(y=>{if(!/s/ in(l)){}})", None),
         ("if (! a < b) {}", Some(serde_json::json!([{ "enforceForOrderingRelations": true }]))),
         ("while (! a > b) {}", Some(serde_json::json!([{ "enforceForOrderingRelations": true }]))),
         ("foo = ! a <= b;", Some(serde_json::json!([{ "enforceForOrderingRelations": true }]))),
@@ -145,5 +148,41 @@ fn test() {
         ("! a <= b", Some(serde_json::json!([{ "enforceForOrderingRelations": true }]))),
     ];
 
-    Tester::new(NoUnsafeNegation::NAME, pass, fail).test_and_snapshot();
+    let fix = vec![
+        ("!a in b", "!(a in b)", None),
+        ("(!a in b)", "(!(a in b))", None),
+        ("!(a) in b", "!((a) in b)", None),
+        ("!a instanceof b", "!(a instanceof b)", None),
+        ("(!a instanceof b)", "(!(a instanceof b))", None),
+        ("!(a) instanceof b", "!((a) instanceof b)", None),
+        (
+            "if (! a < b) {}",
+            "if (!(a < b)) {}",
+            Some(serde_json::json!([{ "enforceForOrderingRelations": true }])),
+        ),
+        (
+            "while (! a > b) {}",
+            "while (!(a > b)) {}",
+            Some(serde_json::json!([{ "enforceForOrderingRelations": true }])),
+        ),
+        (
+            "foo = ! a <= b;",
+            "foo = !(a <= b);",
+            Some(serde_json::json!([{ "enforceForOrderingRelations": true }])),
+        ),
+        (
+            "foo = ! a >= b;",
+            "foo = !(a >= b);",
+            Some(serde_json::json!([{ "enforceForOrderingRelations": true }])),
+        ),
+        (
+            "!a <= b",
+            "!(a <= b)",
+            Some(serde_json::json!([{ "enforceForOrderingRelations": true }])),
+        ),
+    ];
+
+    Tester::new(NoUnsafeNegation::NAME, NoUnsafeNegation::PLUGIN, pass, fail)
+        .expect_fix(fix)
+        .test_and_snapshot();
 }

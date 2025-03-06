@@ -1,29 +1,25 @@
 use oxc_ast::{
-    ast::{Argument, AssignmentTarget, Expression},
     AstKind,
+    ast::{Argument, AssignmentTarget, Expression, match_assignment_target_pattern},
 };
-use oxc_diagnostics::{
-    miette::{self, Diagnostic},
-    thiserror::Error,
-};
+use oxc_diagnostics::OxcDiagnostic;
 use oxc_macros::declare_oxc_lint;
 use oxc_span::Span;
 use oxc_syntax::operator::LogicalOperator;
 
-use crate::{context::LintContext, rule::Rule, AstNode};
+use crate::{AstNode, context::LintContext, rule::Rule};
 
-#[derive(Debug, Error, Diagnostic)]
-#[error("eslint(no-unsafe-optional-chaining): Unsafe usage of optional chaining")]
-#[diagnostic(
-    severity(warning),
-    help("If this short-circuits with 'undefined' the evaluation will throw TypeError")
-)]
-struct NoUnsafeOptionalChainingDiagnostic(#[label] pub Span);
+fn no_unsafe_optional_chaining_diagnostic(span: Span) -> OxcDiagnostic {
+    OxcDiagnostic::warn("Unsafe usage of optional chaining")
+        .with_help("If this short-circuits with 'undefined' the evaluation will throw TypeError")
+        .with_label(span)
+}
 
-#[derive(Debug, Error, Diagnostic)]
-#[error("eslint(no-unsafe-optional-chaining): Unsafe arithmetic operation on optional chaining")]
-#[diagnostic(severity(warning), help("This can result in NaN."))]
-struct NoUnsafeArithmeticDiagnostic(#[label] pub Span);
+fn no_unsafe_arithmetic_diagnostic(span: Span) -> OxcDiagnostic {
+    OxcDiagnostic::warn("Unsafe arithmetic operation on optional chaining")
+        .with_help("This can result in NaN.")
+        .with_label(span)
+}
 
 #[derive(Debug, Default, Clone)]
 pub struct NoUnsafeOptionalChaining {
@@ -53,7 +49,8 @@ declare_oxc_lint!(
     /// const { bar } = obj?.foo;  // TypeError
     /// ```
     NoUnsafeOptionalChaining,
-    restriction // TypeScript checks optional chaining
+    eslint,
+    correctness
 );
 
 impl Rule for NoUnsafeOptionalChaining {
@@ -82,7 +79,7 @@ impl Rule for NoUnsafeOptionalChaining {
                 Self::check_unsafe_usage(&expr.callee, ctx);
             }
             AstKind::AssignmentExpression(expr) => {
-                if matches!(expr.left, AssignmentTarget::AssignmentTargetPattern(_)) {
+                if matches!(expr.left, match_assignment_target_pattern!(AssignmentTarget)) {
                     Self::check_unsafe_usage(&expr.right, ctx);
                 }
                 if expr.operator.is_arithmetic() {
@@ -123,7 +120,7 @@ impl Rule for NoUnsafeOptionalChaining {
                 }
             }
             AstKind::AssignmentTargetWithDefault(target) => {
-                if matches!(target.binding, AssignmentTarget::AssignmentTargetPattern(_)) {
+                if matches!(target.binding, match_assignment_target_pattern!(AssignmentTarget)) {
                     Self::check_unsafe_usage(&target.init, ctx);
                 }
             }
@@ -179,10 +176,10 @@ impl NoUnsafeOptionalChaining {
             Expression::ChainExpression(expr) => {
                 match error_type {
                     ErrorType::Usage => {
-                        ctx.diagnostic(NoUnsafeOptionalChainingDiagnostic(expr.span));
+                        ctx.diagnostic(no_unsafe_optional_chaining_diagnostic(expr.span));
                     }
                     ErrorType::Arithmetic => {
-                        ctx.diagnostic(NoUnsafeArithmeticDiagnostic(expr.span));
+                        ctx.diagnostic(no_unsafe_arithmetic_diagnostic(expr.span));
                     }
                 };
             }
@@ -265,6 +262,10 @@ fn test() {
                 "disallowArithmeticOperators": false
             }])),
         ),
+        ("x?.f<T>();", None),
+        ("x?.f?.<T>();", None),
+        ("f?.<Q>();", None),
+        ("a?.c?.b<c>", None),
     ];
 
     let fail = vec![
@@ -274,5 +275,6 @@ fn test() {
         ("(foo ? obj?.foo : obj?.bar).bar", None),
     ];
 
-    Tester::new(NoUnsafeOptionalChaining::NAME, pass, fail).test_and_snapshot();
+    Tester::new(NoUnsafeOptionalChaining::NAME, NoUnsafeOptionalChaining::PLUGIN, pass, fail)
+        .test_and_snapshot();
 }

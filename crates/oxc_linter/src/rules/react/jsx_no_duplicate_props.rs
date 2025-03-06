@@ -1,26 +1,23 @@
 use oxc_ast::{
-    ast::{JSXAttributeItem, JSXAttributeName},
     AstKind,
+    ast::{JSXAttributeItem, JSXAttributeName},
 };
-use oxc_diagnostics::{
-    miette::{self, Diagnostic},
-    thiserror::{self, Error},
-};
+use oxc_diagnostics::OxcDiagnostic;
 use oxc_macros::declare_oxc_lint;
 use oxc_span::{Atom, Span};
 use rustc_hash::FxHashMap;
 
-use crate::{context::LintContext, rule::Rule, AstNode};
+use crate::{
+    AstNode,
+    context::{ContextHost, LintContext},
+    rule::Rule,
+};
 
-#[derive(Debug, Error, Diagnostic)]
-#[error(
-    "eslint-plugin-react(jsx-no-duplicate-props): No duplicate props allowed. The prop \"{0}\" is duplicated."
-)]
-#[diagnostic(
-    severity(warning),
-    help("Remove one of the props, or rename them so each prop is distinct.")
-)]
-struct JsxNoDuplicatePropsDiagnostic(Atom, #[label] pub Span, #[label] pub Span);
+fn jsx_no_duplicate_props_diagnostic(x0: &str, span1: Span, span2: Span) -> OxcDiagnostic {
+    OxcDiagnostic::warn(format!("No duplicate props allowed. The prop \"{x0}\" is duplicated."))
+        .with_help("Remove one of the props, or rename them so each prop is distinct.")
+        .with_labels([span1, span2])
+}
 
 #[derive(Debug, Default, Clone)]
 pub struct JsxNoDuplicateProps;
@@ -36,39 +33,52 @@ declare_oxc_lint!(
     /// Creating JSX elements with duplicate props can cause unexpected behavior in your application.
     ///
     /// ### Example
-    /// ```javascript
-    /// // Bad
+    ///
+    /// Examples of **incorrect** code for this rule:
+    /// ```jsx
     /// <App a a />;
     /// <App foo={2} bar baz foo={3} />;
+    /// ```
     ///
-    /// // Good
+    /// Examples of **correct** code for this rule:
+    /// ```jsx
     /// <App a />;
     /// <App bar baz foo={3} />;
-    ///
     /// ```
     JsxNoDuplicateProps,
+    react,
     correctness
 );
 
 impl Rule for JsxNoDuplicateProps {
     fn run<'a>(&self, node: &AstNode<'a>, ctx: &LintContext<'a>) {
-        let AstKind::JSXOpeningElement(jsx_opening_elem) = node.kind() else { return };
+        let AstKind::JSXOpeningElement(jsx_opening_elem) = node.kind() else {
+            return;
+        };
 
         let mut props: FxHashMap<Atom, Span> = FxHashMap::default();
 
         for attr in &jsx_opening_elem.attributes {
-            let JSXAttributeItem::Attribute(jsx_attr) = attr else { continue };
+            let JSXAttributeItem::Attribute(jsx_attr) = attr else {
+                continue;
+            };
 
-            let JSXAttributeName::Identifier(ident) = &jsx_attr.name else { continue };
+            let JSXAttributeName::Identifier(ident) = &jsx_attr.name else {
+                continue;
+            };
 
-            if let Some(old_span) = props.insert(ident.name.clone(), ident.span) {
-                ctx.diagnostic(JsxNoDuplicatePropsDiagnostic(
-                    ident.name.clone(),
+            if let Some(old_span) = props.insert(ident.name, ident.span) {
+                ctx.diagnostic(jsx_no_duplicate_props_diagnostic(
+                    ident.name.as_str(),
                     old_span,
                     ident.span,
                 ));
             }
         }
+    }
+
+    fn should_run(&self, ctx: &ContextHost) -> bool {
+        ctx.source_type().is_jsx()
     }
 }
 
@@ -113,5 +123,6 @@ fn test() {
         ),
     ];
 
-    Tester::new(JsxNoDuplicateProps::NAME, pass, fail).test_and_snapshot();
+    Tester::new(JsxNoDuplicateProps::NAME, JsxNoDuplicateProps::PLUGIN, pass, fail)
+        .test_and_snapshot();
 }

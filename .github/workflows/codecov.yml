@@ -2,14 +2,16 @@
 
 name: Code Coverage
 
+permissions: {}
+
 on:
   workflow_dispatch:
   push:
     branches:
       - main
     paths:
-      - '**.rs'
-      - '.github/workflows/codecov.yml'
+      - "**.rs"
+      - ".github/workflows/codecov.yml"
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -21,27 +23,26 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: taiki-e/checkout-action@b13d20b7cda4e2f325ef19895128f7ff735c0b3d # v1.3.1
+
+      - name: Clone submodules
+        uses: ./.github/actions/clone-submodules
+
+      - uses: oxc-project/setup-rust@cd82e1efec7fef815e2c23d296756f31c7cdc03d # v1.0.0
         with:
-          submodules: true # Pull submodules for `cargo coverage`
-
-      - name: Install Rust Toolchain
-        uses: ./.github/actions/rustup
-
-      - name: Install cargo-llvm-cov
-        uses: taiki-e/install-action@cargo-llvm-cov
-
-      - name: Install cargo-nextest
-        uses: taiki-e/install-action@cargo-nextest
-
-      - name: Install llvm-tools-preview for llvm-cov
-        run: rustup component add llvm-tools-preview
+          cache-key: codecov
+          save-cache: ${{ github.ref_name == 'main' }}
+          tools: cargo-llvm-cov
+          components: llvm-tools-preview
 
       - name: Run
+        env:
+          # Increase stack size to 10MB, avoid `oxc_prettier` from stack overflowing when printing long assignment expressions.
+          RUST_MIN_STACK: 104857600
         run: cargo codecov --lcov --output-path lcov.info
 
       - name: Upload Artifact
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@4cec3d8aa04e39d1a68397de0c4cd6fb9dce8ec1 # v4.6.1
         with:
           name: codecov
           path: lcov.info
@@ -57,17 +58,17 @@ jobs:
     steps:
       - name: Checkout
         if: env.CODECOV_TOKEN
-        uses: actions/checkout@v4
+        uses: taiki-e/checkout-action@b13d20b7cda4e2f325ef19895128f7ff735c0b3d # v1.3.1
 
       - name: Download coverage file
         if: env.CODECOV_TOKEN
-        uses: actions/download-artifact@v3
+        uses: actions/download-artifact@cc203385981b70ca67e1cc392babf9cc229d5806 # v4.1.9
         with:
           name: codecov
 
       - name: Upload to codecov.io
         if: env.CODECOV_TOKEN
-        uses: codecov/codecov-action@v3
+        uses: codecov/codecov-action@0565863a31f2c772f9f0395002a31e3f06189574 # v5.4.0
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
           fail_ci_if_error: true

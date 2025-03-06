@@ -1,24 +1,26 @@
-use oxc_ast::{ast::TSType, AstKind};
-use oxc_diagnostics::{
-    miette::{self, Diagnostic},
-    thiserror::Error,
-};
+use oxc_ast::{AstKind, ast::TSType};
+use oxc_diagnostics::OxcDiagnostic;
 use oxc_macros::declare_oxc_lint;
-use oxc_span::{Atom, Span};
+use oxc_span::Span;
 
-use crate::{context::LintContext, rule::Rule, AstNode};
+use crate::{
+    AstNode,
+    context::{ContextHost, LintContext},
+    rule::Rule,
+};
 
-#[derive(Debug, Error, Diagnostic)]
-#[error(
-    "typescript-eslint(no-unnecessary-type-constraint): constraining the generic type {0:?} to {1:?} does nothing and is unnecessary"
-)]
-#[diagnostic(severity(warning), help("Remove the unnecessary {1:?} constraint"))]
-struct NoUnnecessaryTypeConstraintDiagnostic(
-    Atom,
-    &'static str,
-    #[label] pub Span,
-    #[label] pub Span,
-);
+fn no_unnecessary_type_constraint_diagnostic(
+    generic_type: &str,
+    constraint: &str,
+    span: Span,
+    constraint_span: Span,
+) -> OxcDiagnostic {
+    OxcDiagnostic::warn(format!(
+        "constraining the generic type {generic_type:?} to {constraint:?} does nothing and is unnecessary"
+    ))
+    .with_help(format!("Remove the unnecessary {constraint:?} constraint"))
+    .with_labels([span, constraint_span])
+}
 
 #[derive(Debug, Default, Clone)]
 pub struct NoUnnecessaryTypeConstraint;
@@ -30,11 +32,11 @@ declare_oxc_lint!(
     ///
     /// ### Why is this bad?
     ///
-    /// Generic type parameters (<T>) in TypeScript may be "constrained" with an extends keyword.
+    /// Generic type parameters (`<T>`) in TypeScript may be "constrained" with an extends keyword.
     /// When no extends is provided, type parameters default a constraint to unknown. It is therefore redundant to extend from any or unknown.
     ///
     /// ### Example
-    /// ```javascript
+    /// ```typescript
     /// interface FooAny<T extends any> {}
     /// interface FooUnknown<T extends unknown> {}
     /// type BarAny<T extends any> = {};
@@ -46,6 +48,7 @@ declare_oxc_lint!(
     /// function QuuzAny<T extends any>() {}
     /// ```
     NoUnnecessaryTypeConstraint,
+    typescript,
     suspicious
 );
 
@@ -59,8 +62,8 @@ impl Rule for NoUnnecessaryTypeConstraint {
                         TSType::TSUnknownKeyword(t) => ("unknown", t.span),
                         _ => continue,
                     };
-                    ctx.diagnostic(NoUnnecessaryTypeConstraintDiagnostic(
-                        param.name.name.clone(),
+                    ctx.diagnostic(no_unnecessary_type_constraint_diagnostic(
+                        param.name.name.as_str(),
                         value,
                         param.name.span,
                         ty_span,
@@ -68,6 +71,10 @@ impl Rule for NoUnnecessaryTypeConstraint {
                 }
             }
         }
+    }
+
+    fn should_run(&self, ctx: &ContextHost) -> bool {
+        ctx.source_type().is_typescript()
     }
 }
 
@@ -113,5 +120,6 @@ fn test() {
         "type Data<T extends unknown> = {};",
     ];
 
-    Tester::new_without_config(NoUnnecessaryTypeConstraint::NAME, pass, fail).test_and_snapshot();
+    Tester::new(NoUnnecessaryTypeConstraint::NAME, NoUnnecessaryTypeConstraint::PLUGIN, pass, fail)
+        .test_and_snapshot();
 }

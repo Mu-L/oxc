@@ -1,40 +1,13 @@
-# Release crates
+## Oxlint
 
-Manually edit all versions specified by `[workspace.dependencies]` in Cargo.toml,
-also manually edit each of the crates version.
+### Release Oxlint
 
-```bash
-sed -i '' 's/0.1.3/0.2.0/' Cargo.toml
-sed -i '' 's/0.1.3/0.2.0/' crates/oxc/Cargo.toml
-sed -i '' 's/0.1.3/0.2.0/' crates/oxc_allocator/Cargo.toml
-sed -i '' 's/0.1.3/0.2.0/' crates/oxc_ast/Cargo.toml
-sed -i '' 's/0.1.3/0.2.0/' crates/oxc_diagnostics/Cargo.toml
-sed -i '' 's/0.1.3/0.2.0/' crates/oxc_formatter/Cargo.toml
-sed -i '' 's/0.1.3/0.2.0/' crates/oxc_index/Cargo.toml
-sed -i '' 's/0.1.3/0.2.0/' crates/oxc_minifier/Cargo.toml
-sed -i '' 's/0.1.3/0.2.0/' crates/oxc_parser/Cargo.toml
-sed -i '' 's/0.1.3/0.2.0/' crates/oxc_semantic/Cargo.toml
-sed -i '' 's/0.1.3/0.2.0/' crates/oxc_span/Cargo.toml
-sed -i '' 's/0.1.3/0.2.0/' crates/oxc_syntax/Cargo.toml
+- Run [Prepare Release Oxlint] https://github.com/oxc-project/oxc/actions/workflows/prepare_release_oxlint.yml
 
-cargo build
-git add .
-git commit
-just ready
-```
+### E2E Testing
 
-Run the following commands, the order is important.
+- Run [Oxlint Ecosystem CI](https://github.com/oxc-project/oxlint-ecosystem-ci/actions/workflows/ecosystem-ci.yml)
 
-```bash
-cargo publish -p oxc_allocator
-cargo publish -p oxc_index
-cargo publish -p oxc_span
-cargo publish -p oxc_syntax
-cargo publish -p oxc_ast
-cargo publish -p oxc_diagnostics
-cargo publish -p oxc_parser
-cargo publish -p oxc_semantic
-cargo publish -p oxc_formatter
-cargo publish -p oxc_minifier
-cargo publish -p oxc
-```
+## Release Crates
+
+- Run [Prepare Release Crates] https://github.com/oxc-project/oxc/actions/workflows/prepare_release_crates.yml

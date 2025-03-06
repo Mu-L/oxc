@@ -1,80 +1,118 @@
-//! Trivias such as comments
+//! Trivias such as comments and irregular whitespaces
+#![expect(missing_docs)] // FIXME
 
-use std::collections::BTreeMap;
+use std::{
+    iter::FusedIterator,
+    ops::{Bound, RangeBounds},
+};
 
 use oxc_span::Span;
 
-/// A vec of trivias from the lexer, tupled by (span.start, span.end).
-pub type Trivias = Vec<(u32, u32, CommentKind)>;
+use crate::ast::comment::*;
 
-/// Trivias such as comments
-///
-/// Trivia (called that because it's trivial) represent the parts of the source text that are largely insignificant for normal understanding of the code.
-/// For example: whitespace, comments, and even conflict markers.
-#[derive(Debug, Default)]
-pub struct TriviasMap {
-    /// Keyed by span.start
-    comments: BTreeMap<u32, Comment>,
+pub fn comments_range<R>(comments: &[Comment], range: R) -> CommentsRange<'_>
+where
+    R: RangeBounds<u32>,
+{
+    CommentsRange::new(comments, range.start_bound().cloned(), range.end_bound().cloned())
 }
 
-impl From<Trivias> for TriviasMap {
-    fn from(trivias: Trivias) -> Self {
-        Self { comments: trivias.iter().map(|t| (t.0, Comment::new(t.1, t.2))).collect() }
+pub fn has_comments_between(comments: &[Comment], span: Span) -> bool {
+    comments_range(comments, span.start..span.end).count() > 0
+}
+
+/// Double-ended iterator over a range of comments, by starting position.
+pub struct CommentsRange<'c> {
+    comments: &'c [Comment],
+    range: (Bound<u32>, Bound<u32>),
+    current_start: usize,
+    current_end: usize,
+}
+
+impl<'c> CommentsRange<'c> {
+    fn new(comments: &'c [Comment], start: Bound<u32>, end: Bound<u32>) -> Self {
+        // Directly skip all comments that are already known to start
+        // outside the requested range.
+        let partition_start = {
+            let range_start = match start {
+                Bound::Unbounded => 0,
+                Bound::Included(x) => x,
+                Bound::Excluded(x) => x.saturating_add(1),
+            };
+            comments.partition_point(|comment| comment.span.start < range_start)
+        };
+        let partition_end = {
+            let range_end = match end {
+                Bound::Unbounded => u32::MAX,
+                Bound::Included(x) => x,
+                Bound::Excluded(x) => x.saturating_sub(1),
+            };
+            comments.partition_point(|comment| comment.span.start <= range_end)
+        };
+        Self {
+            comments,
+            range: (start, end),
+            current_start: partition_start,
+            current_end: partition_end,
+        }
     }
 }
 
-/// Single or multiline comment
-#[derive(Debug, Clone, Copy)]
-#[allow(unused)]
-pub struct Comment {
-    kind: CommentKind,
-    end: u32,
-}
+impl<'c> Iterator for CommentsRange<'c> {
+    type Item = &'c Comment;
 
-#[derive(Debug, Clone, Copy, Eq, PartialEq)]
-pub enum CommentKind {
-    SingleLine,
-    MultiLine,
-}
-
-impl Comment {
-    pub fn new(end: u32, kind: CommentKind) -> Self {
-        Self { kind, end }
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.current_start < self.current_end {
+            for comment in &self.comments[self.current_start..self.current_end] {
+                self.current_start = self.current_start.saturating_add(1);
+                if self.range.contains(&comment.span.start) {
+                    return Some(comment);
+                }
+            }
+        }
+        None
     }
 
-    pub fn end(self) -> u32 {
-        self.end
-    }
-
-    pub fn is_single_line(self) -> bool {
-        matches!(self.kind, CommentKind::SingleLine)
-    }
-
-    pub fn is_multi_line(self) -> bool {
-        matches!(self.kind, CommentKind::MultiLine)
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        let max_remaining = self.current_end.saturating_sub(self.current_start);
+        (0, Some(max_remaining))
     }
 }
 
-impl TriviasMap {
-    pub fn comments(&self) -> &BTreeMap<u32, Comment> {
-        &self.comments
+impl DoubleEndedIterator for CommentsRange<'_> {
+    fn next_back(&mut self) -> Option<Self::Item> {
+        if self.current_start < self.current_end {
+            for comment in self.comments[self.current_start..self.current_end].iter().rev() {
+                self.current_end = self.current_end.saturating_sub(1);
+                if self.range.contains(&comment.span.start) {
+                    return Some(comment);
+                }
+            }
+        }
+        None
     }
+}
 
-    pub fn has_comments_between(&self, span: Span) -> bool {
-        self.comments.range(span.start..span.end).count() > 0
-    }
+impl FusedIterator for CommentsRange<'_> {}
 
-    pub fn add_single_line_comment(&mut self, span: Span) {
-        let comment = Comment::new(span.end, CommentKind::SingleLine);
-        self.comments.insert(span.start, comment);
-    }
+#[cfg(test)]
+mod test {
+    use super::*;
 
-    pub fn add_multi_line_comment(&mut self, span: Span) {
-        let comment = Comment::new(span.end, CommentKind::MultiLine);
-        self.comments.insert(span.start, comment);
-    }
-
-    pub fn comments_spans(&self) -> impl Iterator<Item = (Comment, Span)> + '_ {
-        self.comments().iter().map(|(start, comment)| (*comment, Span::new(*start, comment.end)))
+    #[test]
+    fn test_comments_range() {
+        let comments = vec![
+            Comment::new(0, 4, CommentKind::Line),
+            Comment::new(5, 9, CommentKind::Line),
+            Comment::new(10, 13, CommentKind::Line),
+            Comment::new(14, 17, CommentKind::Line),
+            Comment::new(18, 23, CommentKind::Line),
+        ]
+        .into_boxed_slice();
+        let full_len = comments.len();
+        assert_eq!(comments_range(&comments, ..).count(), full_len);
+        assert_eq!(comments_range(&comments, 1..).count(), full_len.saturating_sub(1));
+        assert_eq!(comments_range(&comments, ..18).count(), full_len.saturating_sub(1));
+        assert_eq!(comments_range(&comments, ..=18).count(), full_len);
     }
 }

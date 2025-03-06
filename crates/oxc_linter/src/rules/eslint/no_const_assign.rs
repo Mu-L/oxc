@@ -1,52 +1,65 @@
-use oxc_diagnostics::{
-    miette::{self, Diagnostic},
-    thiserror::{self, Error},
-};
+use oxc_diagnostics::OxcDiagnostic;
 use oxc_macros::declare_oxc_lint;
 use oxc_semantic::SymbolId;
-use oxc_span::{Atom, Span};
+use oxc_span::Span;
 
 use crate::{context::LintContext, rule::Rule};
 
-#[derive(Debug, Error, Diagnostic)]
-#[error("eslint(no-const-assign): Unexpected re-assignment of const variable {0}")]
-#[diagnostic(severity(warning))]
-struct NoConstAssignDiagnostic(
-    Atom,
-    #[label("{0} is declared here as const")] pub Span,
-    #[label("{0} is re-assigned here")] pub Span,
-);
+fn no_const_assign_diagnostic(name: &str, decl_span: Span, assign_span: Span) -> OxcDiagnostic {
+    OxcDiagnostic::warn(format!(
+        "eslint(no-const-assign): Unexpected re-assignment of const variable {name}"
+    ))
+    .with_labels([
+        decl_span.label(format!("{name} is declared here as const")),
+        assign_span.label(format!("{name} is re-assigned here")),
+    ])
+}
 
 #[derive(Debug, Default, Clone)]
 pub struct NoConstAssign;
 
 declare_oxc_lint!(
     /// ### What it does
-    /// Disallow reassigning const variables
+    /// Disallow reassigning `const` variables.
     ///
     /// ### Why is this bad?
     /// We cannot modify variables that are declared using const keyword.
     /// It will raise a runtime error.
     ///
     /// ### Example
-    /// ```javascript
+    ///
+    /// Examples of **incorrect** code for this rule:
+    /// ```js
     /// const a = 0;
     /// a = 1;
+    ///
+    /// const b = 0;
+    /// b += 1;
+    /// ```
+    ///
+    /// Examples of **correct** code for this rule:
+    /// ```js
+    /// const a = 0;
+    /// console.log(a);
+    ///
+    /// var b = 0;
+    /// b += 1;
     /// ```
     NoConstAssign,
+    eslint,
     correctness
 );
 
 impl Rule for NoConstAssign {
     fn run_on_symbol(&self, symbol_id: SymbolId, ctx: &LintContext<'_>) {
         let symbol_table = ctx.semantic().symbols();
-        if symbol_table.get_flag(symbol_id).is_const_variable() {
+        if symbol_table.get_flags(symbol_id).is_const_variable() {
             for reference in symbol_table.get_resolved_references(symbol_id) {
                 if reference.is_write() {
-                    ctx.diagnostic(NoConstAssignDiagnostic(
-                        symbol_table.get_name(symbol_id).clone(),
+                    ctx.diagnostic(no_const_assign_diagnostic(
+                        symbol_table.get_name(symbol_id),
                         symbol_table.get_span(symbol_id),
-                        reference.span(),
+                        ctx.semantic().reference_span(reference),
                     ));
                 }
             }
@@ -72,6 +85,8 @@ fn test() {
         ("class X {} X = 1;", None),
         ("try {} catch (x) { x = 1; }", None),
         ("const a = 1; { let a = 2; { a += 1; } }", None),
+        ("const foo = 1;let bar;bar[foo ?? foo] = 42;", None),
+        ("const FOO = 1; ({ files = FOO } = arg1); ", None),
     ];
 
     let fail = vec![
@@ -95,5 +110,5 @@ fn test() {
         ("const b = 0; ({a, ...b} = {a: 1, c: 2, d: 3})", None),
     ];
 
-    Tester::new(NoConstAssign::NAME, pass, fail).test_and_snapshot();
+    Tester::new(NoConstAssign::NAME, NoConstAssign::PLUGIN, pass, fail).test_and_snapshot();
 }

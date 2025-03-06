@@ -1,12 +1,11 @@
 //! Token
 
-use oxc_ast::ast::RegExpFlags;
 use oxc_span::Span;
 
 use super::kind::Kind;
 
-#[derive(Debug, Clone, Default)]
-pub struct Token<'a> {
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Token {
     /// Token Kind
     pub kind: Kind,
 
@@ -19,72 +18,54 @@ pub struct Token<'a> {
     /// Indicates the token is on a newline
     pub is_on_new_line: bool,
 
-    /// Is the original string escaped?
+    /// True if the identifier / string / template kinds has escaped strings.
+    /// The escaped strings are saved in [Lexer::escaped_strings] and [Lexer::escaped_templates] by
+    /// [Token::start].
+    ///
+    /// [Lexer::escaped_strings]: [super::Lexer::escaped_strings]
+    /// [Lexer::escaped_templates]: [super::Lexer::escaped_templates]
     pub escaped: bool,
 
-    pub value: TokenValue<'a>,
+    /// True if for numeric literal tokens that contain separator characters (`_`).
+    ///
+    /// Numeric literals are defined in Section 12.9.3 of the ECMAScript
+    /// standard and include [`Kind::Decimal`], [`Kind::Binary`],
+    /// [`Kind::Octal`], [`Kind::Hex`], etc.
+    has_separator: bool,
+
+    // Padding to fill to 16 bytes.
+    // This makes copying a `Token` 1 x xmmword load & store, rather than 1 x dword + 1 x qword
+    // and `Token::default()` is 1 x xmmword store, rather than 1 x dword + 1 x qword.
+    _padding2: u32,
 }
 
-#[cfg(target_pointer_width = "64")]
-mod size_asserts {
-    use oxc_index::assert_eq_size;
+impl Token {
+    pub(super) fn new_on_new_line() -> Self {
+        Self { is_on_new_line: true, ..Self::default() }
+    }
 
-    assert_eq_size!(super::Token, [u8; 48]);
-}
-
-impl<'a> Token<'a> {
     pub fn span(&self) -> Span {
         Span::new(self.start, self.end)
     }
-}
 
-#[derive(Debug, Clone)]
-pub enum TokenValue<'a> {
-    None,
-    Number(f64),
-    BigInt(num_bigint::BigInt),
-    String(&'a str),
-    RegExp(RegExp<'a>),
-}
+    pub fn escaped(&self) -> bool {
+        self.escaped
+    }
 
-#[derive(Debug, Clone)]
-pub struct RegExp<'a> {
-    pub pattern: &'a str,
-    pub flags: RegExpFlags,
-}
+    #[inline]
+    pub fn has_separator(&self) -> bool {
+        debug_assert!(!self.has_separator || self.kind.is_number());
+        self.has_separator
+    }
 
-impl<'a> Default for TokenValue<'a> {
-    fn default() -> Self {
-        Self::None
+    pub(crate) fn set_has_separator(&mut self) {
+        debug_assert!(!self.has_separator || self.kind.is_number() || self.kind == Kind::default());
+        self.has_separator = true;
     }
 }
 
-impl<'a> TokenValue<'a> {
-    pub fn as_number(&self) -> f64 {
-        match self {
-            Self::Number(s) => *s,
-            _ => unreachable!("expected number!"),
-        }
-    }
-
-    pub fn as_bigint(&self) -> num_bigint::BigInt {
-        match self {
-            Self::BigInt(s) => s.clone(),
-            _ => unreachable!("expected bigint!"),
-        }
-    }
-
-    pub fn as_regex(&self) -> &RegExp<'a> {
-        match self {
-            Self::RegExp(regex) => regex,
-            _ => unreachable!("expected regex!"),
-        }
-    }
-
-    pub fn get_string(&self) -> Option<&str> {
-        match self {
-            Self::String(s) => Some(s),
-            _ => None,
-        }
-    }
+#[cfg(test)]
+mod size_asserts {
+    use super::Token;
+    const _: () = assert!(std::mem::size_of::<Token>() == 16);
 }

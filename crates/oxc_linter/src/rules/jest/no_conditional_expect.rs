@@ -1,22 +1,24 @@
-use oxc_ast::{ast::Expression, AstKind};
-use oxc_diagnostics::{
-    miette::{self, Diagnostic},
-    thiserror::Error,
-};
+use oxc_ast::AstKind;
+use oxc_diagnostics::OxcDiagnostic;
 use oxc_macros::declare_oxc_lint;
+use oxc_semantic::{AstNode, NodeId};
 use oxc_span::Span;
+use rustc_hash::FxHashSet;
 
 use crate::{
     context::LintContext,
     rule::Rule,
-    utils::{is_type_of_jest_fn_call, JestFnKind, JestGeneralFnKind},
-    AstNode,
+    utils::{
+        JestFnKind, JestGeneralFnKind, PossibleJestNode, is_type_of_jest_fn_call,
+        parse_expect_jest_fn_call,
+    },
 };
 
-#[derive(Debug, Error, Diagnostic)]
-#[error("eslint-plugin-jest(no-conditional-expect): Unexpected conditional expect")]
-#[diagnostic(severity(warning), help("Avoid calling `expect` conditionally`"))]
-struct NoConditionalExpectDiagnostic(#[label] pub Span);
+fn no_conditional_expect_diagnostic(span: Span) -> OxcDiagnostic {
+    OxcDiagnostic::warn("Unexpected conditional expect")
+        .with_help("Avoid calling `expect` conditionally`")
+        .with_label(span)
+}
 
 #[derive(Debug, Default, Clone)]
 pub struct NoConditionalExpect;
@@ -29,11 +31,16 @@ declare_oxc_lint!(
     ///
     /// ### Why is this bad?
     ///
-    /// Jest only considers a test to have failed if it throws an error, meaning if calls to assertion functions like expect occur in conditional code such as a catch statement, tests can end up passing but not actually test anything.
-    /// Additionally, conditionals tend to make tests more brittle and complex, as they increase the amount of mental thinking needed to understand what is actually being tested.
+    /// Jest only considers a test to have failed if it throws an error, meaning if calls to
+    /// assertion functions like expect occur in conditional code such as a catch statement,
+    /// tests can end up passing but not actually test anything. Additionally, conditionals
+    /// tend to make tests more brittle and complex, as they increase the amount of mental
+    /// thinking needed to understand what is actually being tested.
     ///
-    /// ### Example
-    /// ```javascript
+    /// ### Examples
+    ///
+    /// Examples of **incorrect** code for this rule:
+    /// ```js
     /// it('foo', () => {
     ///   doTest && expect(1).toBe(2);
     /// });
@@ -44,48 +51,114 @@ declare_oxc_lint!(
     ///   }
     /// });
     ///
+    /// it('baz', async () => {
+    ///   try {
+    ///     await foo();
+    ///   } catch (err) {
+    ///     expect(err).toMatchObject({ code: 'MODULE_NOT_FOUND' });
+    ///   }
+    /// });
+    ///
     /// it('throws an error', async () => {
-    //   await foo().catch(error => expect(error).toBeInstanceOf(error));
-    // });
+    ///   await foo().catch(error => expect(error).toBeInstanceOf(error));
+    /// });
+    /// ```
+    ///
+    /// Examples of **correct** code for this rule:
+    /// ```js
+    /// it('foo', () => {
+    ///   expect(!value).toBe(false);
+    /// });
+    ///
+    /// function getValue() {
+    ///   if (process.env.FAIL) {
+    ///     return 1;
+    ///   }
+    ///   return 2;
+    /// }
+    ///
+    /// it('foo', () => {
+    ///   expect(getValue()).toBe(2);
+    /// });
+    ///
+    /// it('validates the request', () => {
+    ///   try {
+    ///     processRequest(request);
+    ///   } catch { } finally {
+    ///     expect(validRequest).toHaveBeenCalledWith(request);
+    ///   }
+    /// });
+    ///
+    /// it('throws an error', async () => {
+    ///   await expect(foo).rejects.toThrow(Error);
+    /// });
     /// ```
     NoConditionalExpect,
-    restriction
+    jest,
+    correctness
 );
 
-impl Rule for NoConditionalExpect {
-    fn run<'a>(&self, node: &AstNode<'a>, ctx: &LintContext<'a>) {
-        if let AstKind::CallExpression(call_expr) = node.kind() {
-            if !is_type_of_jest_fn_call(call_expr, node, ctx, &[JestFnKind::Expect]) {
-                return;
-            }
+// To flag we encountered a conditional block/catch block when traversing the parents.
+#[derive(Debug, Clone, Copy)]
+struct InConditional(bool);
 
-            let has_condition_or_catch = check_parents(node, ctx, false);
-            if has_condition_or_catch {
-                ctx.diagnostic(NoConditionalExpectDiagnostic(call_expr.span));
+impl Rule for NoConditionalExpect {
+    fn run_on_jest_node<'a, 'c>(
+        &self,
+        possible_jest_node: &PossibleJestNode<'a, 'c>,
+        ctx: &'c LintContext<'a>,
+    ) {
+        let node = possible_jest_node.node;
+        if let AstKind::CallExpression(call_expr) = node.kind() {
+            let Some(jest_fn_call) = parse_expect_jest_fn_call(call_expr, possible_jest_node, ctx)
+            else {
+                return;
+            };
+
+            // Record visited nodes for avoid infinite loop.
+            let mut visited = FxHashSet::default();
+
+            // When first visiting the node, we assume it's not in a conditional block.
+            let has_condition_or_catch =
+                check_parents(node, &mut visited, InConditional(false), ctx);
+            if matches!(has_condition_or_catch, InConditional(true)) {
+                ctx.diagnostic(no_conditional_expect_diagnostic(jest_fn_call.head.span));
             }
         }
     }
 }
 
-fn check_parents<'a>(node: &AstNode<'a>, ctx: &LintContext<'a>, in_conditional: bool) -> bool {
-    let Some(parent) = ctx.nodes().parent_node(node.id()) else {
-        return false;
+fn check_parents<'a>(
+    node: &AstNode<'a>,
+    visited: &mut FxHashSet<NodeId>,
+    in_conditional: InConditional,
+    ctx: &LintContext<'a>,
+) -> InConditional {
+    // if the node is already visited, we should return `false` to avoid infinite loop.
+    if !visited.insert(node.id()) {
+        return InConditional(false);
+    }
+
+    let Some(parent_node) = ctx.nodes().parent_node(node.id()) else {
+        return InConditional(false);
     };
 
-    match parent.kind() {
+    match parent_node.kind() {
         AstKind::CallExpression(call_expr) => {
+            let jest_node = PossibleJestNode { node: parent_node, original: None };
+
             if is_type_of_jest_fn_call(
                 call_expr,
-                parent,
+                &jest_node,
                 ctx,
                 &[JestFnKind::General(JestGeneralFnKind::Test)],
             ) {
                 return in_conditional;
             }
 
-            if let Expression::MemberExpression(member_expr) = &call_expr.callee {
+            if let Some(member_expr) = call_expr.callee.as_member_expression() {
                 if member_expr.static_property_name() == Some("catch") {
-                    return check_parents(parent, ctx, true);
+                    return check_parents(parent_node, visited, InConditional(true), ctx);
                 }
             }
         }
@@ -93,36 +166,44 @@ fn check_parents<'a>(node: &AstNode<'a>, ctx: &LintContext<'a>, in_conditional: 
         | AstKind::SwitchStatement(_)
         | AstKind::IfStatement(_)
         | AstKind::ConditionalExpression(_)
-        | AstKind::LogicalExpression(_) => return check_parents(parent, ctx, true),
+        | AstKind::LogicalExpression(_) => {
+            return check_parents(parent_node, visited, InConditional(true), ctx);
+        }
         AstKind::Function(function) => {
             let Some(ident) = &function.id else {
-                return false;
+                return InConditional(false);
             };
             let symbol_table = ctx.semantic().symbols();
-            let Some(symbol_id) = ident.symbol_id.get() else {
-                return false;
-            };
+            let symbol_id = ident.symbol_id();
 
-            return symbol_table.get_resolved_references(symbol_id).any(|reference| {
+            // Consider cases like:
+            // ```javascript
+            // function foo() {
+            //   foo()
+            // }
+            // ````
+            // To avoid infinite loop, we need to check if the function is already visited when
+            // call `check_parents`.
+            let boolean = symbol_table.get_resolved_references(symbol_id).any(|reference| {
                 let Some(parent) = ctx.nodes().parent_node(reference.node_id()) else {
                     return false;
                 };
-
-                check_parents(parent, ctx, in_conditional)
+                matches!(check_parents(parent, visited, in_conditional, ctx), InConditional(true))
             });
+            return InConditional(boolean);
         }
-        AstKind::Program(_) => return false,
+        AstKind::Program(_) => return InConditional(false),
         _ => {}
     }
 
-    check_parents(parent, ctx, in_conditional)
+    check_parents(parent_node, visited, in_conditional, ctx)
 }
 
 #[test]
 fn test() {
     use crate::tester::Tester;
 
-    let pass = vec![
+    let mut pass = vec![
         (
             "
                 it('foo', () => {
@@ -372,9 +453,31 @@ fn test() {
             ",
             None,
         ),
+        (
+            "function verifyVNodeTree(vnode) {
+                    if (vnode._nextDom) {
+                        expect.fail('vnode should not have _nextDom:' + vnode._nextDom);
+                    }
+
+                    if (vnode._children) {
+                        for (let child of vnode._children) {
+                            if (child) {
+                                verifyVNodeTree(child);
+                            }
+                        }
+                    }
+                }",
+            None,
+        ),
+        (
+            "it('throws an error', async () => {
+                await expect(foo).rejects.toThrow(Error);
+            });",
+            None,
+        ),
     ];
 
-    let fail = vec![
+    let mut fail = vec![
         (
             "
                 it('foo', () => {
@@ -805,7 +908,133 @@ fn test() {
             ",
             None,
         ),
+        (
+            "
+            it('works', async () => {
+                verifyVNodeTree(vnode);
+
+                function verifyVNodeTree(vnode) {
+                    if (vnode._nextDom) {
+                        expect.fail('vnode should not have _nextDom:' + vnode._nextDom);
+                    }
+
+                    if (vnode._children) {
+                        for (let child of vnode._children) {
+                            if (child) {
+                                    verifyVNodeTree(child);
+                            }
+                        }
+                    }
+                }
+            });
+            ",
+            None,
+        ),
     ];
 
-    Tester::new(NoConditionalExpect::NAME, pass, fail).test_and_snapshot();
+    let pass_vitest = vec![
+        "
+            it('foo', () => {
+                process.env.FAIL && setNum(1);
+
+                expect(num).toBe(2);
+            });
+        ",
+        "
+            function getValue() {
+                let num = 2;
+
+                process.env.FAIL && setNum(1);
+
+                return num;
+            }
+
+            it('foo', () => {
+                expect(getValue()).toBe(2);
+            });
+        ",
+        "
+            function getValue() {
+                let num = 2;
+
+                process.env.FAIL || setNum(1);
+
+                return num;
+            }
+
+            it('foo', () => {
+                expect(getValue()).toBe(2);
+            });
+        ",
+        "
+            it('foo', () => {
+                const num = process.env.FAIL ? 1 : 2;
+
+                expect(num).toBe(2);
+            });
+        ",
+        "
+            function getValue() {
+                return process.env.FAIL ? 1 : 2
+            }
+
+            it('foo', () => {
+                expect(getValue()).toBe(2);
+            });
+        ",
+    ];
+
+    let fail_vitest = vec![
+        "
+            it('foo', () => {
+                something && expect(something).toHaveBeenCalled();
+            })
+        ",
+        "
+            it('foo', () => {
+                a || (b && expect(something).toHaveBeenCalled());
+            })
+        ",
+        "
+            it.each``('foo', () => {
+                something || expect(something).toHaveBeenCalled();
+            });
+        ",
+        "
+            it.each()('foo', () => {
+                something || expect(something).toHaveBeenCalled();
+            })
+        ",
+        "
+            function getValue() {
+                something || expect(something).toHaveBeenCalled();
+            }
+            it('foo', getValue);
+        ",
+        "
+            it('foo', () => {
+                something ? expect(something).toHaveBeenCalled() : noop();
+            })
+        ",
+        "
+            function getValue() {
+                something ? expect(something).toHaveBeenCalled() : noop();
+            }
+
+            it('foo', getValue);
+        ",
+        "
+            it('foo', () => {
+                something ? noop() : expect(something).toHaveBeenCalled();
+            })
+        ",
+    ];
+
+    pass.extend(pass_vitest.into_iter().map(|x| (x, None)));
+    fail.extend(fail_vitest.into_iter().map(|x| (x, None)));
+
+    Tester::new(NoConditionalExpect::NAME, NoConditionalExpect::PLUGIN, pass, fail)
+        .with_jest_plugin(true)
+        .with_vitest_plugin(true)
+        .test_and_snapshot();
 }

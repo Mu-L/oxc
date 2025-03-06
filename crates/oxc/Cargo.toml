@@ -1,38 +1,79 @@
 [package]
-name                   = "oxc"
-version                = "0.2.0"
-publish                = true
-authors.workspace      = true
-description.workspace  = true
-edition.workspace      = true
-homepage.workspace     = true
-keywords.workspace     = true
-license.workspace      = true
-repository.workspace   = true
+name = "oxc"
+version = "0.56.0"
+authors.workspace = true
+categories.workspace = true
+edition.workspace = true
+homepage.workspace = true
+include = ["/src"]
+keywords.workspace = true
+license.workspace = true
+publish = true
+repository.workspace = true
 rust-version.workspace = true
-categories.workspace   = true
+description.workspace = true
+
+[lints]
+workspace = true
 
 [lib]
+test = false
 doctest = false
 
+[[example]]
+name = "compiler"
+path = "examples/compiler.rs"
+required-features = ["full"]
+
 [dependencies]
-oxc_allocator   = { workspace = true }
-oxc_ast         = { workspace = true }
+oxc_allocator = { workspace = true }
+oxc_ast = { workspace = true }
+oxc_parser = { workspace = true }
+oxc_regular_expression = { workspace = true }
+
+oxc_ast_visit = { workspace = true, optional = true }
+oxc_cfg = { workspace = true, optional = true }
+oxc_codegen = { workspace = true, optional = true }
 oxc_diagnostics = { workspace = true }
-oxc_index       = { workspace = true }
-oxc_parser      = { workspace = true }
-oxc_span        = { workspace = true }
-oxc_syntax      = { workspace = true }
-oxc_semantic    = { workspace = true, optional = true }
-oxc_formatter   = { workspace = true, optional = true }
+oxc_isolated_declarations = { workspace = true, optional = true }
+oxc_mangler = { workspace = true, optional = true }
+oxc_minifier = { workspace = true, optional = true }
+oxc_semantic = { workspace = true, optional = true }
+oxc_span = { workspace = true }
+oxc_syntax = { workspace = true }
 oxc_transformer = { workspace = true, optional = true }
-oxc_minifier    = { workspace = true, optional = true }
-oxc_codegen     = { workspace = true, optional = true }
 
 [features]
-serde       = ["oxc_ast/serde"]
-semantic    = ["oxc_semantic"]
-formatter   = ["oxc_formatter"]
+full = [
+  "codegen",
+  "mangler",
+  "minifier",
+  "semantic",
+  "transformer",
+  "isolated_declarations",
+  "ast_visit",
+  "cfg",
+]
+
+semantic = ["oxc_semantic"]
 transformer = ["oxc_transformer"]
-minifier    = ["oxc_minifier"]
-codegen     = ["oxc_codegen"]
+minifier = ["oxc_mangler", "oxc_minifier"]
+codegen = ["oxc_codegen"]
+mangler = ["oxc_mangler"]
+cfg = ["oxc_cfg"]
+isolated_declarations = ["oxc_isolated_declarations"]
+ast_visit = ["oxc_ast_visit"]
+
+serialize = [
+  "oxc_allocator/from_raw_parts",
+  "oxc_ast/serialize",
+  "oxc_ast_visit/serialize",
+  "oxc_semantic?/serialize",
+  "oxc_span/serialize",
+  "oxc_syntax/serialize",
+]
+
+wasm = ["oxc_transformer/wasm"]
+
+[package.metadata.docs.rs]
+all-features = true

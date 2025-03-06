@@ -1,21 +1,16 @@
-use oxc_diagnostics::{
-    miette::{self, Diagnostic},
-    thiserror::{self, Error},
-};
+use oxc_diagnostics::OxcDiagnostic;
 use oxc_macros::declare_oxc_lint;
 use oxc_semantic::SymbolId;
-use oxc_span::{Atom, Span};
+use oxc_span::Span;
 
 use crate::{context::LintContext, rule::Rule};
 
-#[derive(Debug, Error, Diagnostic)]
-#[error("eslint(no-class-assign): Unexpected re-assignment of class {0}")]
-#[diagnostic(severity(warning))]
-struct NoClassAssignDiagnostic(
-    Atom,
-    #[label("{0} is declared as class here")] pub Span,
-    #[label("{0} is re-assigned here")] pub Span,
-);
+fn no_class_assign_diagnostic(name: &str, decl_span: Span, assign_span: Span) -> OxcDiagnostic {
+    OxcDiagnostic::warn(format!("Unexpected re-assignment of class {name}")).with_labels([
+        decl_span.label(format!("{name} is declared as class here")),
+        assign_span.label(format!("{name} is re-assigned here")),
+    ])
+}
 
 #[derive(Debug, Default, Clone)]
 pub struct NoClassAssign;
@@ -35,19 +30,20 @@ declare_oxc_lint!(
     /// let a = new A() // Error
     /// ```
     NoClassAssign,
+    eslint,
     correctness
 );
 
 impl Rule for NoClassAssign {
     fn run_on_symbol(&self, symbol_id: SymbolId, ctx: &LintContext<'_>) {
         let symbol_table = ctx.semantic().symbols();
-        if symbol_table.get_flag(symbol_id).is_class() {
+        if symbol_table.get_flags(symbol_id).is_class() {
             for reference in symbol_table.get_resolved_references(symbol_id) {
                 if reference.is_write() {
-                    ctx.diagnostic(NoClassAssignDiagnostic(
-                        symbol_table.get_name(symbol_id).clone(),
+                    ctx.diagnostic(no_class_assign_diagnostic(
+                        symbol_table.get_name(symbol_id),
                         symbol_table.get_span(symbol_id),
-                        reference.span(),
+                        ctx.semantic().reference_span(reference),
                     ));
                 }
             }
@@ -89,5 +85,5 @@ fn test() {
         ("if (foo) { class A {} A = 1; }", None),
     ];
 
-    Tester::new(NoClassAssign::NAME, pass, fail).test_and_snapshot();
+    Tester::new(NoClassAssign::NAME, NoClassAssign::PLUGIN, pass, fail).test_and_snapshot();
 }

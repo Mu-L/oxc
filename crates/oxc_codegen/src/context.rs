@@ -1,52 +1,48 @@
-#![allow(non_upper_case_globals)]
-
+#![expect(missing_docs)] // FIXME
 use bitflags::bitflags;
 
 bitflags! {
-    #[derive(Debug, Clone, Copy)]
+    #[derive(Debug, Default, Clone, Copy)]
     pub struct Context: u8 {
         /// [In]
-        const In = 1 << 0;
-    }
-}
-
-impl Default for Context {
-    fn default() -> Self {
-        Self::In
+        const FORBID_IN   = 1 << 0;
+        const FORBID_CALL = 1 << 1;
+        const TYPESCRIPT  = 1 << 2;
     }
 }
 
 impl Context {
     #[inline]
-    pub fn has_in(self) -> bool {
-        self.contains(Self::In)
+    pub fn forbid_in(self) -> bool {
+        self.contains(Self::FORBID_IN)
     }
 
     #[inline]
-    pub fn and_in(self, include: bool) -> Self {
-        self.and(Self::In, include)
+    pub fn forbid_call(self) -> bool {
+        self.contains(Self::FORBID_CALL)
+    }
+
+    #[inline]
+    #[must_use]
+    pub fn with_typescript(mut self) -> Self {
+        self |= Self::TYPESCRIPT;
+        self
+    }
+
+    #[inline]
+    #[must_use]
+    pub fn and_forbid_in(self, include: bool) -> Self {
+        self.and(Self::FORBID_IN, include)
+    }
+
+    #[inline]
+    #[must_use]
+    pub fn and_forbid_call(self, include: bool) -> Self {
+        self.and(Self::FORBID_CALL, include)
     }
 
     #[inline]
     fn and(self, flag: Self, set: bool) -> Self {
-        if set {
-            self | flag
-        } else {
-            self - flag
-        }
-    }
-
-    #[inline]
-    pub(crate) fn union_in_if(self, include: bool) -> Self {
-        self.union_if(Self::In, include)
-    }
-
-    #[inline]
-    fn union_if(self, other: Self, include: bool) -> Self {
-        if include {
-            self.union(other)
-        } else {
-            self
-        }
+        if set { self | flag } else { self - flag }
     }
 }

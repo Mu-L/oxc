@@ -1,20 +1,16 @@
-use oxc_ast::ast::Expression;
-use oxc_ast::AstKind;
-use oxc_diagnostics::{
-    miette::{self, Diagnostic},
-    thiserror::Error,
-};
-use oxc_formatter::Gen;
+use oxc_ast::{AstKind, ast::Expression};
+use oxc_diagnostics::OxcDiagnostic;
 use oxc_macros::declare_oxc_lint;
-use oxc_span::Span;
+use oxc_span::{GetSpan, Span};
 use oxc_syntax::operator::BinaryOperator;
 
-use crate::{context::LintContext, fixer::Fix, rule::Rule, AstNode};
+use crate::{AstNode, context::LintContext, rule::Rule};
 
-#[derive(Debug, Error, Diagnostic)]
-#[error("eslint-plugin-unicorn(no-instanceof-array): Use `Array.isArray()` instead of `instanceof Array`.")]
-#[diagnostic(severity(warning), help("The instanceof Array check doesn't work across realms/contexts, for example, frames/windows in browsers or the vm module in Node.js."))]
-struct NoInstanceofArrayDiagnostic(#[label] pub Span);
+fn no_instanceof_array_diagnostic(span: Span) -> OxcDiagnostic {
+    OxcDiagnostic::warn("Use `Array.isArray()` instead of `instanceof Array`.")
+        .with_help("The instanceof Array check doesn't work across realms/contexts, for example, frames/windows in browsers or the vm module in Node.js.")
+        .with_label(span)
+}
 
 #[derive(Debug, Default, Clone)]
 pub struct NoInstanceofArray;
@@ -32,27 +28,31 @@ declare_oxc_lint!(
     /// [1,2,3] instanceof Array;
     /// ```
     NoInstanceofArray,
-    pedantic
+    unicorn,
+    pedantic,
+    fix
 );
 
 impl Rule for NoInstanceofArray {
     fn run<'a>(&self, node: &AstNode<'a>, ctx: &LintContext<'a>) {
-        let AstKind::BinaryExpression(expr) = node.kind() else { return };
+        let AstKind::BinaryExpression(expr) = node.kind() else {
+            return;
+        };
         if expr.operator != BinaryOperator::Instanceof {
             return;
         }
 
-        match &expr.right {
+        match &expr.right.without_parentheses() {
             Expression::Identifier(identifier) if identifier.name == "Array" => {
-                ctx.diagnostic_with_fix(NoInstanceofArrayDiagnostic(expr.span), || {
+                ctx.diagnostic_with_fix(no_instanceof_array_diagnostic(expr.span), |fixer| {
                     let modified_code = {
-                        let mut formatter = ctx.formatter();
-                        formatter.print_str(b"Array.isArray(");
-                        expr.left.gen(&mut formatter);
-                        formatter.print(b')');
-                        formatter.into_code()
+                        let mut codegen = String::new();
+                        codegen.push_str("Array.isArray(");
+                        codegen.push_str(fixer.source_range(expr.left.span()));
+                        codegen.push(')');
+                        codegen
                     };
-                    Fix::new(modified_code, expr.span)
+                    fixer.replace(expr.span, modified_code)
                 });
             }
             _ => {}
@@ -78,6 +78,7 @@ fn test() {
     let fail = vec![
         ("arr instanceof Array", None),
         ("[] instanceof Array", None),
+        ("[] instanceof (Array)", None),
         ("[1,2,3] instanceof Array === true", None),
         ("fun.call(1, 2, 3) instanceof Array", None),
         ("obj.arr instanceof Array", None),
@@ -89,7 +90,7 @@ fn test() {
     let fix = vec![
         ("arr instanceof Array", "Array.isArray(arr)", None),
         ("[] instanceof Array", "Array.isArray([])", None),
-        ("[1,2,3] instanceof Array === true", "Array.isArray([1, 2, 3]) === true", None),
+        ("[1,2,3] instanceof Array === true", "Array.isArray([1,2,3]) === true", None),
         ("fun.call(1, 2, 3) instanceof Array", "Array.isArray(fun.call(1, 2, 3))", None),
         ("obj.arr instanceof Array", "Array.isArray(obj.arr)", None),
         ("foo.bar[2] instanceof Array", "Array.isArray(foo.bar[2])", None),
@@ -101,5 +102,7 @@ fn test() {
         ),
     ];
 
-    Tester::new(NoInstanceofArray::NAME, pass, fail).expect_fix(fix).test_and_snapshot();
+    Tester::new(NoInstanceofArray::NAME, NoInstanceofArray::PLUGIN, pass, fail)
+        .expect_fix(fix)
+        .test_and_snapshot();
 }

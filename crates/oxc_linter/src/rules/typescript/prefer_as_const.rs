@@ -1,19 +1,22 @@
-use oxc_ast::ast::{Expression, TSLiteral, TSType};
-use oxc_ast::AstKind;
-
-use oxc_diagnostics::{
-    miette::{self, Diagnostic},
-    thiserror::Error,
+use oxc_ast::{
+    AstKind,
+    ast::{Expression, TSLiteral, TSType},
 };
+use oxc_diagnostics::OxcDiagnostic;
 use oxc_macros::declare_oxc_lint;
 use oxc_span::Span;
 
-use crate::{context::LintContext, fixer::Fix, rule::Rule, AstNode};
+use crate::{
+    AstNode,
+    context::{ContextHost, LintContext},
+    rule::Rule,
+};
 
-#[derive(Debug, Error, Diagnostic)]
-#[error("typescript-eslint(prefer-as-const): Expected a `const` assertion instead of a literal type annotation.")]
-#[diagnostic(severity(warning), help("You should use `as const` instead of type annotation."))]
-struct PreferAsConstDiagnostic(#[label] pub Span);
+fn prefer_as_const_diagnostic(span: Span) -> OxcDiagnostic {
+    OxcDiagnostic::warn("Expected a `const` assertion instead of a literal type annotation.")
+        .with_help("You should use `as const` instead of type annotation.")
+        .with_label(span)
+}
 
 #[derive(Debug, Default, Clone)]
 pub struct PreferAsConst;
@@ -31,12 +34,14 @@ declare_oxc_lint!(
     /// This rule reports when an as with an explicit literal type can be replaced with an as const.
     ///
     /// ### Example
-    /// ```javascript
+    /// ```ts
     /// let bar: 2 = 2;
     /// let foo = { bar: 'baz' as 'baz' };
     /// ```
     PreferAsConst,
-    correctness
+    typescript,
+    correctness,
+    conditional_fix
 );
 
 impl Rule for PreferAsConst {
@@ -81,6 +86,10 @@ impl Rule for PreferAsConst {
             _ => {}
         }
     }
+
+    fn should_run(&self, ctx: &ContextHost) -> bool {
+        ctx.source_type().is_typescript()
+    }
 }
 
 fn check_and_report(
@@ -101,12 +110,8 @@ fn check_and_report(
                 }
                 _ => None,
             },
-            TSLiteral::NullLiteral(null_literal) => match initial_value_expression {
-                Expression::NullLiteral(_) => Some(null_literal.span),
-                _ => None,
-            },
-            TSLiteral::NumberLiteral(number_literal) => match initial_value_expression {
-                Expression::NumberLiteral(initial_number) => {
+            TSLiteral::NumericLiteral(number_literal) => match initial_value_expression {
+                Expression::NumericLiteral(initial_number) => {
                     if (number_literal.value - initial_number.value).abs() < f64::EPSILON {
                         Some(number_literal.span)
                     } else {
@@ -119,13 +124,11 @@ fn check_and_report(
         };
         if let Some(span) = error_span {
             if can_fix {
-                ctx.diagnostic_with_fix(PreferAsConstDiagnostic(span), || {
-                    let start = span.start;
-                    let end = span.end;
-                    Fix::new("const", Span { start, end })
+                ctx.diagnostic_with_fix(prefer_as_const_diagnostic(span), |fixer| {
+                    fixer.replace(span, "const")
                 });
             } else {
-                ctx.diagnostic(PreferAsConstDiagnostic(span));
+                ctx.diagnostic(prefer_as_const_diagnostic(span));
             }
         }
     }
@@ -192,5 +195,7 @@ fn test() {
         // ("class foo { foo = <'bar'>'bar'; }", "class foo { foo = <const>'bar'; }", None),
     ];
 
-    Tester::new_without_config(PreferAsConst::NAME, pass, fail).expect_fix(fix).test_and_snapshot();
+    Tester::new(PreferAsConst::NAME, PreferAsConst::PLUGIN, pass, fail)
+        .expect_fix(fix)
+        .test_and_snapshot();
 }

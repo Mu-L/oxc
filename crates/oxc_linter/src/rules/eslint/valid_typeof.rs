@@ -1,23 +1,27 @@
-use oxc_ast::{ast::Expression, AstKind};
-use oxc_diagnostics::{
-    miette::{self, Diagnostic},
-    thiserror::Error,
-};
+use oxc_ast::{AstKind, ast::Expression};
+use oxc_diagnostics::OxcDiagnostic;
 use oxc_macros::declare_oxc_lint;
 use oxc_span::{GetSpan, Span};
 use oxc_syntax::operator::UnaryOperator;
-use phf::{phf_set, Set};
+use phf::{Set, phf_set};
 
-use crate::{context::LintContext, fixer::Fix, rule::Rule, AstNode};
+use crate::{AstNode, context::LintContext, rule::Rule};
 
-#[derive(Debug, Error, Diagnostic)]
-enum ValidTypeofDiagnostic {
-    #[error("eslint(valid-typeof): Typeof comparisons should be to string literals.")]
-    #[diagnostic(severity(warning))]
-    NotString(#[help] Option<&'static str>, #[label] Span),
-    #[error("eslint(valid-typeof): Invalid typeof comparison value.")]
-    #[diagnostic(severity(warning))]
-    InvalidValue(#[help] Option<&'static str>, #[label] Span),
+fn not_string(help: Option<&'static str>, span: Span) -> OxcDiagnostic {
+    let mut d =
+        OxcDiagnostic::warn("Typeof comparisons should be to string literals.").with_label(span);
+    if let Some(x) = help {
+        d = d.with_help(x);
+    }
+    d
+}
+
+fn invalid_value(help: Option<&'static str>, span: Span) -> OxcDiagnostic {
+    let mut d = OxcDiagnostic::warn("Invalid typeof comparison value.").with_label(span);
+    if let Some(x) = help {
+        d = d.with_help(x);
+    }
+    d
 }
 
 #[derive(Debug, Clone, Default)]
@@ -30,22 +34,26 @@ declare_oxc_lint!(
     /// Enforce comparing `typeof` expressions against valid strings
     ///
     /// ### Why is this bad?
-    /// It is usually a typing mistake to compare the result of a typeof operator to other string literals.
+    /// It is usually a typing mistake to compare the result of a `typeof`
+    /// operator to other string literals.
+    ///
     /// ### Example
-    /// ```javascript
-    /// requireStringLiterals: false
-    /// incorrect:
+    /// ```js
+    /// // requireStringLiterals: false
+    /// // incorrect:
     /// typeof foo === "strnig"
-    /// correct:
+    /// // correct:
     /// typeof foo === "string"
     /// typeof foo === baz
     ///
-    /// requireStringLiterals: true
-    /// incorrect:
+    /// // requireStringLiterals: true
+    /// // incorrect:
     /// typeof foo === baz
     /// ```
     ValidTypeof,
+    eslint,
     correctness,
+    conditional_fix
 );
 
 impl Rule for ValidTypeof {
@@ -75,7 +83,7 @@ impl Rule for ValidTypeof {
 
         if let Expression::StringLiteral(lit) = sibling {
             if !VALID_TYPES.contains(lit.value.as_str()) {
-                ctx.diagnostic(ValidTypeofDiagnostic::InvalidValue(None, sibling.span()));
+                ctx.diagnostic(invalid_value(None, sibling.span()));
             }
             return;
         }
@@ -83,27 +91,29 @@ impl Rule for ValidTypeof {
         if let Expression::TemplateLiteral(template) = sibling {
             if template.expressions.is_empty() {
                 if template.quasi().is_some_and(|value| !VALID_TYPES.contains(value.as_str())) {
-                    ctx.diagnostic(ValidTypeofDiagnostic::InvalidValue(None, sibling.span()));
+                    ctx.diagnostic(invalid_value(None, sibling.span()));
                 }
                 return;
             }
         }
 
         if let Expression::Identifier(ident) = sibling {
-            if ident.name == "undefined" && ctx.semantic().is_reference_to_global_variable(ident) {
+            if ident.name == "undefined"
+                && ctx.scopes().root_unresolved_references().contains_key(ident.name.as_str())
+            {
                 ctx.diagnostic_with_fix(
                     if self.require_string_literals {
-                        ValidTypeofDiagnostic::NotString(
+                        not_string(
                             Some("Use `\"undefined\"` instead of `undefined`."),
                             sibling.span(),
                         )
                     } else {
-                        ValidTypeofDiagnostic::InvalidValue(
+                        invalid_value(
                             Some("Use `\"undefined\"` instead of `undefined`."),
                             sibling.span(),
                         )
                     },
-                    || Fix::new("\"undefined\"", sibling.span()),
+                    |fixer| fixer.replace(sibling.span(), "\"undefined\""),
                 );
                 return;
             }
@@ -112,12 +122,12 @@ impl Rule for ValidTypeof {
         if self.require_string_literals
             && !matches!(sibling, Expression::UnaryExpression(unary) if unary.operator == UnaryOperator::Typeof)
         {
-            ctx.diagnostic(ValidTypeofDiagnostic::NotString(None, sibling.span()));
+            ctx.diagnostic(not_string(None, sibling.span()));
         }
     }
 
     fn from_configuration(value: serde_json::Value) -> Self {
-        let require_string_literals = value.get(0).map_or(false, |config| {
+        let require_string_literals = value.get(0).is_some_and(|config| {
             config
                 .get("requireStringLiterals")
                 .and_then(serde_json::Value::as_bool)
@@ -215,5 +225,9 @@ fn test() {
         ),
     ];
 
-    Tester::new(ValidTypeof::NAME, pass, fail).test_and_snapshot();
+    let fix = vec![("typeof foo === undefined", r#"typeof foo === "undefined""#)];
+
+    Tester::new(ValidTypeof::NAME, ValidTypeof::PLUGIN, pass, fail)
+        .expect_fix(fix)
+        .test_and_snapshot();
 }

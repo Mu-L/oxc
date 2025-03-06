@@ -1,17 +1,15 @@
 use oxc_ast::AstKind;
-use oxc_diagnostics::{
-    miette::{self, Diagnostic},
-    thiserror::Error,
-};
+use oxc_diagnostics::OxcDiagnostic;
 use oxc_macros::declare_oxc_lint;
 use oxc_span::{GetSpan, Span};
 
-use crate::{ast_util::IsConstant, context::LintContext, rule::Rule, AstNode};
+use crate::{AstNode, ast_util::IsConstant, context::LintContext, rule::Rule};
 
-#[derive(Debug, Error, Diagnostic)]
-#[error("eslint(no-constant-condition): Unexpected constant condition")]
-#[diagnostic(severity(warning), help("Constant expression as a test condition is not allowed"))]
-struct NoConstantConditionDiagnostic(#[label] pub Span);
+fn no_constant_condition_diagnostic(span: Span) -> OxcDiagnostic {
+    OxcDiagnostic::warn("Unexpected constant condition")
+        .with_help("Constant expression as a test condition is not allowed")
+        .with_label(span)
+}
 
 #[derive(Debug, Default, Clone)]
 pub struct NoConstantCondition {
@@ -25,16 +23,47 @@ declare_oxc_lint!(
     ///
     /// ### Why is this bad?
     ///
-    /// A constant expression (for example, a literal) as a test condition might be a typo or development trigger for a specific behavior.
+    /// A constant expression (for example, a literal) as a test condition might
+    /// be a typo or development trigger for a specific behavior.
+    ///
+    /// This rule disallows constant expressions in the test condition of:
+    ///
+    /// - `if`, `for`, `while`, or `do...while` statement
+    /// - `?`: ternary expression
+    ///
     ///
     /// ### Example
     ///
-    /// ```javascript
+    /// Examples of **incorrect** code for this rule:
+    /// ```js
     /// if (false) {
     ///    doSomethingUnfinished();
     /// }
+    ///
+    /// if (new Boolean(x)) {
+    ///     doSomethingAlways();
+    /// }
+    /// if (x ||= true) {
+    ///     doSomethingAlways();
+    /// }
+    ///
+    /// do {
+    ///     doSomethingForever();
+    /// } while (x = -1);
+    /// ```
+    ///
+    /// Examples of **correct** code for this rule:
+    /// ```js
+    /// if (x === 0) {
+    ///     doSomething();
+    /// }
+    ///
+    /// while (typeof x === "undefined") {
+    ///     doSomething();
+    /// }
     /// ```
     NoConstantCondition,
+    eslint,
     correctness
 );
 
@@ -54,12 +83,12 @@ impl Rule for NoConstantCondition {
         match node.kind() {
             AstKind::IfStatement(if_stmt) => {
                 if if_stmt.test.is_constant(true, ctx) {
-                    ctx.diagnostic(NoConstantConditionDiagnostic(if_stmt.test.span()));
+                    ctx.diagnostic(no_constant_condition_diagnostic(if_stmt.test.span()));
                 }
             }
             AstKind::ConditionalExpression(condition_expr) => {
                 if condition_expr.test.is_constant(true, ctx) {
-                    ctx.diagnostic(NoConstantConditionDiagnostic(condition_expr.test.span()));
+                    ctx.diagnostic(no_constant_condition_diagnostic(condition_expr.test.span()));
                 }
             }
             _ => {}
@@ -377,5 +406,6 @@ fn test() {
         // ("function* foo() { for (let foo = 1 + 2 + 3 + (yield); true; baz) {}}", None),
     ];
 
-    Tester::new(NoConstantCondition::NAME, pass, fail).test_and_snapshot();
+    Tester::new(NoConstantCondition::NAME, NoConstantCondition::PLUGIN, pass, fail)
+        .test_and_snapshot();
 }

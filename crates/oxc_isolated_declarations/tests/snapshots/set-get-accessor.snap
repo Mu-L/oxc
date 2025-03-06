@@ -1,0 +1,37 @@
+---
+source: crates/oxc_isolated_declarations/tests/mod.rs
+input_file: crates/oxc_isolated_declarations/tests/fixtures/set-get-accessor.ts
+---
+```
+==================== .D.TS ====================
+
+declare class Cls {
+	get a(): number;
+	set a(value);
+	get b(): string;
+	set b(v: string);
+	private get c();
+	private set c(value);
+	accessor d: string;
+	private accessor e;
+	private static accessor f;
+}
+declare class ClsBad {
+	get a();
+	set a(v);
+}
+
+
+==================== Errors ====================
+
+  x TS9009: At least one accessor must have an explicit return type annotation
+  | with --isolatedDeclarations.
+    ,-[25:7]
+ 24 | class ClsBad {
+ 25 |   get a() {
+    :       ^
+ 26 |     return;
+    `----
+
+
+```

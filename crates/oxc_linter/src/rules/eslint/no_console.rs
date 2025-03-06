@@ -1,20 +1,32 @@
-use oxc_ast::{ast::Expression, AstKind};
-use oxc_diagnostics::{
-    miette::{self, Diagnostic},
-    thiserror::Error,
-};
+use oxc_ast::{AstKind, ast::Expression};
+use oxc_diagnostics::OxcDiagnostic;
 use oxc_macros::declare_oxc_lint;
-use oxc_span::Span;
+use oxc_span::{CompactStr, GetSpan, Span};
 
-use crate::{context::LintContext, rule::Rule, AstNode};
+use crate::{
+    AstNode,
+    context::LintContext,
+    fixer::{RuleFix, RuleFixer},
+    rule::Rule,
+};
 
-#[derive(Debug, Error, Diagnostic)]
-#[error("eslint(no-console): Unexpected console statement.")]
-#[diagnostic(severity(warning))]
-struct NoConsoleDiagnostic(#[label] pub Span);
+fn no_console_diagnostic(span: Span, allow: &[CompactStr]) -> OxcDiagnostic {
+    let only_msg = if allow.is_empty() {
+        String::from("Delete this console statement.")
+    } else {
+        format!("Supported methods are: {}.", allow.join(", "))
+    };
+
+    OxcDiagnostic::warn("eslint(no-console): Unexpected console statement.")
+        .with_label(span)
+        .with_help(only_msg)
+}
 
 #[derive(Debug, Default, Clone)]
-pub struct NoConsole {
+pub struct NoConsole(Box<NoConsoleConfig>);
+
+#[derive(Debug, Default, Clone)]
+pub struct NoConsoleConfig {
     /// A list of methods allowed to be used.
     ///
     /// ```javascript
@@ -22,7 +34,15 @@ pub struct NoConsole {
     /// console.log('foo'); // will error
     /// console.info('bar'); // will not error
     /// ```
-    pub allow: Vec<String>,
+    pub allow: Vec<CompactStr>,
+}
+
+impl std::ops::Deref for NoConsole {
+    type Target = NoConsoleConfig;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
 }
 
 declare_oxc_lint!(
@@ -40,45 +60,91 @@ declare_oxc_lint!(
     /// console.log('here');
     /// ```
     NoConsole,
-    restriction
+    eslint,
+    restriction,
+    suggestion
 );
 
 impl Rule for NoConsole {
     fn from_configuration(value: serde_json::Value) -> Self {
-        Self {
+        Self(Box::new(NoConsoleConfig {
             allow: value
                 .get(0)
                 .and_then(|v| v.get("allow"))
                 .and_then(serde_json::Value::as_array)
                 .map(|v| {
-                    v.iter()
-                        .filter_map(serde_json::Value::as_str)
-                        .map(ToString::to_string)
-                        .collect()
+                    v.iter().filter_map(serde_json::Value::as_str).map(CompactStr::from).collect()
                 })
                 .unwrap_or_default(),
-        }
+        }))
     }
 
     fn run<'a>(&self, node: &AstNode<'a>, ctx: &LintContext<'a>) {
-        if let AstKind::CallExpression(call_expr) = node.kind() {
-            if let Expression::MemberExpression(mem) = &call_expr.callee {
-                if let Expression::Identifier(ident) = mem.object() {
-                    if ctx.semantic().is_reference_to_global_variable(ident)
-                        && ident.name == "console"
-                        && !self
-                            .allow
-                            .iter()
-                            .any(|s| mem.static_property_name().is_some_and(|f| f == s))
-                    {
-                        if let Some(mem) = mem.static_property_info() {
-                            ctx.diagnostic(NoConsoleDiagnostic(mem.0));
-                        }
-                    }
-                }
+        let AstKind::CallExpression(call_expr) = node.kind() else {
+            return;
+        };
+        let Some(mem) = call_expr.callee.as_member_expression() else {
+            return;
+        };
+        let Expression::Identifier(ident) = mem.object() else {
+            return;
+        };
+
+        if ident.name == "console"
+            && ctx.scopes().root_unresolved_references().contains_key(ident.name.as_str())
+            && !self.allow.iter().any(|s| mem.static_property_name().is_some_and(|f| f == s))
+        {
+            if let Some((mem_span, _)) = mem.static_property_info() {
+                let diagnostic_span = ident.span().merge(mem_span);
+
+                ctx.diagnostic_with_suggestion(
+                    no_console_diagnostic(diagnostic_span, &self.allow),
+                    |fixer| remove_console(fixer, ctx, node),
+                );
             }
         }
     }
+}
+
+fn remove_console<'c, 'a: 'c>(
+    fixer: RuleFixer<'c, 'a>,
+    ctx: &'c LintContext<'a>,
+    node: &AstNode<'a>,
+) -> RuleFix<'a> {
+    let mut node_to_delete = node;
+    for parent in ctx.nodes().ancestors(node.id()).skip(1) {
+        match parent.kind() {
+            AstKind::ParenthesizedExpression(_)
+            | AstKind::ExpressionStatement(_)
+            => node_to_delete = parent,
+            AstKind::IfStatement(_)
+            | AstKind::WhileStatement(_)
+            | AstKind::ForStatement(_)
+            | AstKind::ForInStatement(_)
+            | AstKind::ForOfStatement(_)
+            | AstKind::ArrowFunctionExpression(_) => {
+                return fixer.replace(node_to_delete.span(), "{}")
+            }
+            // Arrow function AST nodes do not say whether they have brackets or
+            // not, so we need to check manually.
+            // e.g: const x = () => { console.log(foo) }
+            // vs:  const x = () => console.log(foo)
+            | AstKind::FunctionBody(body) if !fixer.source_range(body.span).starts_with('{') => {
+                return fixer.replace(node_to_delete.span(), "{}")
+            }
+            // Marked as dangerous until we're sure this is safe
+            AstKind::ConditionalExpression(_)
+            // from: const x = (console.log("foo"), 5);
+            // to:   const x = (undefined, 5);
+            | AstKind::SequenceExpression(_)
+            | AstKind::ObjectProperty(_)
+            => {
+                return fixer.replace(node_to_delete.span(), "undefined").dangerously()
+            }
+            _ => break,
+        }
+    }
+    fixer.delete(node_to_delete)
 }
 
 #[test]
@@ -86,34 +152,69 @@ fn test() {
     use crate::tester::Tester;
 
     let pass = vec![
-        ("Console.info(foo)", None),
-        ("console.info(foo)", Some(serde_json::json!([{ "allow": ["info"] }]))),
-        ("console.warn(foo)", Some(serde_json::json!([{ "allow": ["warn"] }]))),
-        ("console.error(foo)", Some(serde_json::json!([{ "allow": ["error"] }]))),
-        ("console.log(foo)", Some(serde_json::json!([{ "allow": ["log"] }]))),
-        ("console.info(foo)", Some(serde_json::json!([{ "allow": ["warn", "info"] }]))),
-        ("console.warn(foo)", Some(serde_json::json!([{ "allow": ["error", "warn"] }]))),
-        ("console.error(foo)", Some(serde_json::json!([{ "allow": ["log", "error"] }]))),
-        ("console.log(foo)", Some(serde_json::json!([{ "allow": ["info", "log", "warn"] }]))),
-        ("var console = require('myconsole'); console.log(foo)", None),
-        ("import console from 'myconsole'; console.log(foo)", None),
+        ("Console.info(foo)", None, None),
+        ("console.info(foo)", Some(serde_json::json!([{ "allow": ["info"] }])), None),
+        (
+            "console.info(foo)",
+            Some(serde_json::json!([{ "allow": ["info"] }])),
+            Some(serde_json::json!({ "env": { "browser": true}})),
+        ),
+        (
+            "console.info(foo)",
+            Some(serde_json::json!([{ "allow": ["info"] }])),
+            Some(serde_json::json!({ "globals": { "console": "readonly"}})),
+        ),
+        ("console.warn(foo)", Some(serde_json::json!([{ "allow": ["warn"] }])), None),
+        ("console.error(foo)", Some(serde_json::json!([{ "allow": ["error"] }])), None),
+        ("console.log(foo)", Some(serde_json::json!([{ "allow": ["log"] }])), None),
+        ("console.info(foo)", Some(serde_json::json!([{ "allow": ["warn", "info"] }])), None),
+        ("console.warn(foo)", Some(serde_json::json!([{ "allow": ["error", "warn"] }])), None),
+        ("console.error(foo)", Some(serde_json::json!([{ "allow": ["log", "error"] }])), None),
+        ("console.log(foo)", Some(serde_json::json!([{ "allow": ["info", "log", "warn"] }])), None),
+        ("var console = require('myconsole'); console.log(foo)", None, None),
+        ("import console from 'myconsole'; console.log(foo)", None, None),
     ];
 
     let fail = vec![
-        ("console.log()", None),
-        ("console.log(foo)", None),
-        ("console.error(foo)", None),
-        ("console.info(foo)", None),
-        ("console.warn(foo)", None),
-        ("console.log(foo)", Some(serde_json::json!([{ "allow": ["error"] }]))),
-        ("console.error(foo)", Some(serde_json::json!([{ "allow": ["warn"] }]))),
-        ("console.info(foo)", Some(serde_json::json!([{ "allow": ["log"] }]))),
-        ("console.warn(foo)", Some(serde_json::json!([{ "allow": ["error"] }]))),
-        ("console.log(foo)", Some(serde_json::json!([{ "allow": ["warn", "info"] }]))),
-        ("console.error(foo)", Some(serde_json::json!([{ "allow": ["warn", "info", "log"] }]))),
-        ("console.info(foo)", Some(serde_json::json!([{ "allow": ["warn", "error", "log"] }]))),
-        ("console.warn(foo)", Some(serde_json::json!([{ "allow": ["info", "log"] }]))),
+        ("console.log()", None, None),
+        ("console.log(foo)", None, None),
+        ("console.error(foo)", None, None),
+        ("console.info(foo)", None, None),
+        ("console.warn(foo)", None, None),
+        ("console.log()", None, Some(serde_json::json!({ "env": { "browser": true}}))),
+        ("console.log()", None, Some(serde_json::json!({ "globals": { "console": "off"}}))),
+        ("console.log(foo)", Some(serde_json::json!([{ "allow": ["error"] }])), None),
+        ("console.error(foo)", Some(serde_json::json!([{ "allow": ["warn"] }])), None),
+        ("console.info(foo)", Some(serde_json::json!([{ "allow": ["log"] }])), None),
+        ("console.warn(foo)", Some(serde_json::json!([{ "allow": ["error"] }])), None),
+        ("console.log(foo)", Some(serde_json::json!([{ "allow": ["warn", "info"] }])), None),
+        (
+            "console.error(foo)",
+            Some(serde_json::json!([{ "allow": ["warn", "info", "log"] }])),
+            None,
+        ),
+        (
+            "console.info(foo)",
+            Some(serde_json::json!([{ "allow": ["warn", "error", "log"] }])),
+            None,
+        ),
+        ("console.warn(foo)", Some(serde_json::json!([{ "allow": ["info", "log"] }])), None),
     ];
 
-    Tester::new(NoConsole::NAME, pass, fail).test_and_snapshot();
+    let fix = vec![
+        ("function foo() { console.log(bar); }", "function foo() {  }", None),
+        ("function foo() { console.log(bar) }", "function foo() {  }", None),
+        ("const x = () => console.log(foo)", "const x = () => {}", None),
+        ("const x = () => { console.log(foo) }", "const x = () => {  }", None),
+        ("const x = () => { console.log(foo); }", "const x = () => {  }", None),
+        ("const x = () => { ((console.log(foo))); }", "const x = () => {  }", None),
+        ("const x = () => { console.log(foo); return 5 }", "const x = () => {  return 5 }", None),
+        ("if (foo) { console.log(foo) }", "if (foo) {  }", None),
+        ("foo ? console.log(foo) : 5", "foo ? undefined : 5", None),
+        ("(console.log(foo), 5)", "(undefined, 5)", None),
+        ("(5, console.log(foo))", "(5, undefined)", None),
+        ("const x = { foo: console.log(bar) }", "const x = { foo: undefined }", None),
+    ];
+
+    Tester::new(NoConsole::NAME, NoConsole::PLUGIN, pass, fail).expect_fix(fix).test_and_snapshot();
 }

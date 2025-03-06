@@ -1,27 +1,19 @@
 use std::path::PathBuf;
 
-use oxc_ast::{
-    ast::{Argument, Expression},
-    AstKind,
-};
-use oxc_diagnostics::{
-    miette::{self, Diagnostic},
-    thiserror::Error,
-};
+use oxc_ast::{AstKind, ast::Argument};
+use oxc_diagnostics::OxcDiagnostic;
 use oxc_macros::declare_oxc_lint;
 use oxc_span::Span;
 
 use crate::{context::LintContext, rule::Rule};
 
-#[derive(Debug, Error, Diagnostic)]
-#[error("eslint-plugin-jest(no-mocks-import): Mocks should not be manually imported from a `__mocks__` directory.")]
-#[diagnostic(
-    severity(warning),
-    help("Instead use `jest.mock` and import from the original module path.")
-)]
-struct NoMocksImportDiagnostic(#[label] pub Span);
+fn no_mocks_import_diagnostic(span: Span) -> OxcDiagnostic {
+    OxcDiagnostic::warn("Mocks should not be manually imported from a `__mocks__` directory.")
+        .with_help("Instead use `jest.mock` and import from the original module path.")
+        .with_label(span)
+}
 
-/// <https://github.com/jest-community/eslint-plugin-jest/blob/main/docs/rules/no-mocks-import.md>
+/// <https://github.com/jest-community/eslint-plugin-jest/blob/v28.9.0/docs/rules/no-mocks-import.md>
 #[derive(Debug, Default, Clone)]
 pub struct NoMocksImport;
 
@@ -30,24 +22,36 @@ declare_oxc_lint!(
     ///
     /// This rule reports imports from a path containing a __mocks__ component.
     ///
+    /// ### Why is this bad?
+    ///
+    /// Manually importing mocks from a `__mocks__` directory can lead to unexpected behavior.
+    ///
     /// ### Example
-    /// ```javascript
+    ///
+    /// Examples of **incorrect** code for this rule:
+    /// ```ts
     /// import thing from './__mocks__/index';
     /// require('./__mocks__/index');
-    /// require('__mocks__');
+    /// ```
     ///
+    /// Examples of **correct** code for this rule:
+    /// ```ts
+    /// import thing from 'thing';
+    /// require('thing');
+    /// ```
     NoMocksImport,
-    restriction
+    jest,
+    style
 );
 
 impl Rule for NoMocksImport {
     fn run_once(&self, ctx: &LintContext) {
-        let module_records = ctx.semantic().module_record();
+        let module_records = ctx.module_record();
 
         for import_entry in &module_records.import_entries {
-            let module_specifier = import_entry.module_request.name().as_str();
+            let module_specifier = import_entry.module_request.name();
             if contains_mocks_dir(module_specifier) {
-                ctx.diagnostic(NoMocksImportDiagnostic(import_entry.module_request.span()));
+                ctx.diagnostic(no_mocks_import_diagnostic(import_entry.module_request.span()));
             }
         }
 
@@ -56,8 +60,8 @@ impl Rule for NoMocksImport {
             return;
         };
 
-        for reference_id in require_reference_ids {
-            let reference = ctx.symbols().get_reference(*reference_id);
+        for &reference_id in require_reference_ids {
+            let reference = ctx.symbols().get_reference(reference_id);
             let Some(parent) = ctx.nodes().parent_node(reference.node_id()) else {
                 return;
             };
@@ -65,14 +69,12 @@ impl Rule for NoMocksImport {
                 return;
             };
 
-            let Some(Argument::Expression(Expression::StringLiteral(string_literal))) =
-                call_expr.arguments.get(0)
-            else {
+            let Some(Argument::StringLiteral(string_literal)) = call_expr.arguments.first() else {
                 return;
             };
 
             if contains_mocks_dir(&string_literal.value) {
-                ctx.diagnostic(NoMocksImportDiagnostic(string_literal.span));
+                ctx.diagnostic(no_mocks_import_diagnostic(string_literal.span));
             }
         }
     }
@@ -112,5 +114,7 @@ fn test() {
         ("import thing from './__mocks__/index'", None),
     ];
 
-    Tester::new(NoMocksImport::NAME, pass, fail).test_and_snapshot();
+    Tester::new(NoMocksImport::NAME, NoMocksImport::PLUGIN, pass, fail)
+        .with_jest_plugin(true)
+        .test_and_snapshot();
 }

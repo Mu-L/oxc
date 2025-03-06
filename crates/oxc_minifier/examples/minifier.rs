@@ -1,56 +1,61 @@
+#![expect(clippy::print_stdout)]
 use std::path::Path;
 
 use oxc_allocator::Allocator;
-use oxc_codegen::{Codegen, CodegenOptions};
-use oxc_minifier::{Minifier, MinifierOptions};
+use oxc_codegen::{CodeGenerator, CodegenOptions};
+use oxc_mangler::MangleOptions;
+use oxc_minifier::{CompressOptions, Minifier, MinifierOptions};
 use oxc_parser::Parser;
 use oxc_span::SourceType;
-
 use pico_args::Arguments;
-
-#[cfg(not(target_env = "msvc"))]
-#[global_allocator]
-static GLOBAL: jemallocator::Jemalloc = jemallocator::Jemalloc;
-
-#[cfg(target_os = "windows")]
-#[global_allocator]
-static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 // Instruction:
 // create a `test.js`,
-// run `cargo run -p oxc_minifier --example minifier`
-// or `just watch "run -p oxc_minifier --example minifier"`
+// run `cargo run -p oxc_minifier --example minifier` or `just example minifier`
 
-fn main() {
+fn main() -> std::io::Result<()> {
     let mut args = Arguments::from_env();
 
-    let name = args.subcommand().ok().flatten().unwrap_or_else(|| String::from("test.js"));
     let mangle = args.contains("--mangle");
-    let whitespace = args.contains("--whitespace");
+    let nospace = args.contains("--nospace");
     let twice = args.contains("--twice");
+    let name = args.free_from_str().unwrap_or_else(|_| "test.js".to_string());
 
     let path = Path::new(&name);
-    let source_text = std::fs::read_to_string(path).unwrap_or_else(|_| panic!("{name} not found"));
+    let source_text = std::fs::read_to_string(path)?;
     let source_type = SourceType::from_path(path).unwrap();
 
-    let printed = minify(&source_text, source_type, mangle, whitespace);
+    let mut allocator = Allocator::default();
+    let printed = minify(&allocator, &source_text, source_type, mangle, nospace);
     println!("{printed}");
 
     if twice {
-        let printed = minify(&printed, source_type, mangle, whitespace);
-        println!("{printed}");
+        allocator.reset();
+        let printed2 = minify(&allocator, &printed, source_type, mangle, nospace);
+        println!("{printed2}");
+        println!("same = {}", printed == printed2);
     }
+
+    Ok(())
 }
 
-fn minify(source_text: &str, source_type: SourceType, mangle: bool, whitespace: bool) -> String {
-    let allocator = Allocator::default();
-    let program = Parser::new(&allocator, source_text, source_type).parse().program;
-    let program = allocator.alloc(program);
-    let options = MinifierOptions { mangle, ..MinifierOptions::default() };
-    Minifier::new(options).build(&allocator, program);
-    if whitespace {
-        Codegen::<true>::new(source_text.len(), CodegenOptions).build(program)
-    } else {
-        Codegen::<false>::new(source_text.len(), CodegenOptions).build(program)
-    }
+fn minify(
+    allocator: &Allocator,
+    source_text: &str,
+    source_type: SourceType,
+    mangle: bool,
+    nospace: bool,
+) -> String {
+    let ret = Parser::new(allocator, source_text, source_type).parse();
+    let mut program = ret.program;
+    let options = MinifierOptions {
+        mangle: mangle.then(MangleOptions::default),
+        compress: Some(CompressOptions::default()),
+    };
+    let ret = Minifier::new(options).build(allocator, &mut program);
+    CodeGenerator::new()
+        .with_options(CodegenOptions { minify: nospace, ..CodegenOptions::default() })
+        .with_symbol_table(ret.symbol_table)
+        .build(&program)
+        .code
 }

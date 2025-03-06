@@ -1,5 +1,4 @@
 //! ECMAScript Grammar Contexts: `[In`] `[Yield]` `[Await]`
-#![allow(non_upper_case_globals)]
 
 use bitflags::bitflags;
 
@@ -30,6 +29,9 @@ bitflags! {
         /// i.e. the [Return] in Statement[Yield, Await, Return]
         const Return = 1<< 3;
 
+        /// If node was parsed as part of a decorator
+        const Decorator = 1 << 4;
+
         /// Typescript should parse extends clause as conditional type instead of type constrains.
         /// Used in infer clause
         ///
@@ -38,13 +40,13 @@ bitflags! {
         ///
         /// type X<U, T> = T extends (infer U extends number ? U : T) ? U : T;
         /// The "(infer U extends number ? U : T)" is conditional type.
-        const DisallowConditionalTypes = 1 << 4;
+        const DisallowConditionalTypes = 1 << 5;
 
         /// A declaration file, or inside something with the `declare` modifier.
         /// Declarations that don't define an implementation is "ambient":
         ///   * ambient variable declaration => `declare var $: any`
         ///   * ambient class declaration => `declare class C { foo(); } , etc..`
-        const Ambient = 1 << 5;
+        const Ambient = 1 << 6;
     }
 }
 
@@ -76,6 +78,11 @@ impl Context {
     }
 
     #[inline]
+    pub(crate) fn has_decorator(self) -> bool {
+        self.contains(Self::Decorator)
+    }
+
+    #[inline]
     pub(crate) fn has_disallow_conditional_types(self) -> bool {
         self.contains(Self::DisallowConditionalTypes)
     }
@@ -91,17 +98,18 @@ impl Context {
     }
 
     #[inline]
+    pub(crate) fn union_ambient_if(self, include: bool) -> Self {
+        self.union_if(Self::Ambient, include)
+    }
+
+    #[inline]
     pub(crate) fn union_yield_if(self, include: bool) -> Self {
         self.union_if(Self::Yield, include)
     }
 
     #[inline]
     fn union_if(self, other: Self, include: bool) -> Self {
-        if include {
-            self.union(other)
-        } else {
-            self
-        }
+        if include { self.union(other) } else { self }
     }
 
     #[inline]
@@ -125,17 +133,18 @@ impl Context {
     }
 
     #[inline]
+    pub(crate) fn and_decorator(self, include: bool) -> Self {
+        self.and(Self::Decorator, include)
+    }
+
+    #[inline]
     pub(crate) fn and_ambient(self, include: bool) -> Self {
         self.and(Self::Ambient, include)
     }
 
     #[inline]
     fn and(self, flag: Self, set: bool) -> Self {
-        if set {
-            self | flag
-        } else {
-            self - flag
-        }
+        if set { self | flag } else { self - flag }
     }
 }
 

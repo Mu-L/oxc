@@ -1,16 +1,14 @@
-use oxc_diagnostics::{
-    miette::{self, Diagnostic},
-    thiserror::Error,
-};
+use oxc_diagnostics::OxcDiagnostic;
 use oxc_macros::declare_oxc_lint;
 use oxc_span::Span;
 
 use crate::{context::LintContext, rule::Rule, utils::is_jest_file};
 
-#[derive(Debug, Error, Diagnostic)]
-#[error("eslint-plugin-jest(no-export): Do not export from a test file.")]
-#[diagnostic(severity(warning), help("If you want to share code between tests, move it into a separate file and import it from there."))]
-struct NoExportDiagnostic(#[label] pub Span);
+fn no_export_diagnostic(span: Span) -> OxcDiagnostic {
+    OxcDiagnostic::warn("Do not export from a test file.")
+        .with_help("If you want to share code between tests, move it into a separate file and import it from there.")
+        .with_label(span)
+}
 
 #[derive(Debug, Default, Clone)]
 pub struct NoExport;
@@ -34,7 +32,8 @@ declare_oxc_lint!(
     /// });
     /// ```
     NoExport,
-    restriction
+    jest,
+    correctness
 );
 
 impl Rule for NoExport {
@@ -44,28 +43,44 @@ impl Rule for NoExport {
             return;
         }
 
-        for local_export in &ctx.semantic().module_record().local_export_entries {
-            ctx.diagnostic(NoExportDiagnostic(local_export.span));
+        for span in ctx.module_record().exported_bindings.values() {
+            ctx.diagnostic(no_export_diagnostic(*span));
+        }
+
+        if let Some(span) = ctx.module_record().export_default {
+            ctx.diagnostic(no_export_diagnostic(span));
         }
     }
 }
 
 #[test]
 fn test() {
+    use std::path::PathBuf;
+
     use crate::tester::Tester;
 
     let pass = vec![
-        ("describe('a test', () => { expect(1).toBe(1); })", None),
-        ("window.location = 'valid'", None),
-        ("module.somethingElse = 'foo';", None),
-        ("export const myThing = 'valid'", None),
-        ("export default function () {}", None),
-        ("module.exports = function(){}", None),
-        ("module.exports.myThing = 'valid';", None),
+        (
+            "describe('a test', () => { expect(1).toBe(1); })",
+            None,
+            None,
+            Some(PathBuf::from("foo.test.js")),
+        ),
+        ("window.location = 'valid'", None, None, None),
+        ("module.somethingElse = 'foo';", None, None, None),
+        ("export const myThing = 'valid'", None, None, Some(PathBuf::from("foo.js"))),
+        ("export default function () {}", None, None, Some(PathBuf::from("foo.js"))),
+        ("module.exports = function(){}", None, None, None),
+        ("module.exports.myThing = 'valid';", None, None, None),
     ];
 
     let fail = vec![
-        ("export const myThing = 'invalid'; test('a test', () => { expect(1).toBe(1);});", None),
+        (
+            "export const myThing = 'invalid'; test('a test', () => { expect(1).toBe(1);});",
+            None,
+            None,
+            Some(PathBuf::from("foo.test.js")),
+        ),
         (
             "
               export const myThing = 'invalid';
@@ -75,6 +90,8 @@ fn test() {
               });
             ",
             None,
+            None,
+            Some(PathBuf::from("foo.test.js")),
         ),
         (
             "
@@ -85,6 +102,8 @@ fn test() {
               });
             ",
             None,
+            None,
+            Some(PathBuf::from("foo.test.js")),
         ),
         (
             "
@@ -94,8 +113,15 @@ fn test() {
               });
             ",
             None,
+            None,
+            Some(PathBuf::from("foo.test.js")),
         ),
-        ("export default function() {};  test('a test', () => { expect(1).toBe(1);});", None),
+        (
+            "export default function() {};  test('a test', () => { expect(1).toBe(1);});",
+            None,
+            None,
+            Some(PathBuf::from("foo.test.js")),
+        ),
         (
             "
               const foo = 1;
@@ -105,6 +131,8 @@ fn test() {
               export {foo, bar};
             ",
             None,
+            None,
+            Some(PathBuf::from("foo.test.js")),
         ),
         // TODO: support `module.exports`
         // ("module.exports['invalid'] = function() {};  test('a test', () => { expect(1).toBe(1);});", None),
@@ -112,5 +140,7 @@ fn test() {
         // ("module.export.invalid = function() {}; ;  test('a test', () => { expect(1).toBe(1);});", None)
     ];
 
-    Tester::new(NoExport::NAME, pass, fail).test_and_snapshot();
+    Tester::new(NoExport::NAME, NoExport::PLUGIN, pass, fail)
+        .with_jest_plugin(true)
+        .test_and_snapshot();
 }

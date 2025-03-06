@@ -1,313 +1,546 @@
-use oxc_diagnostics::{
-    miette::{self, Diagnostic},
-    thiserror::{self, Error},
-};
-use oxc_span::{Atom, Span};
+use std::borrow::Cow;
 
-#[derive(Debug, Error, Diagnostic)]
-#[error("Flow is not supported")]
-#[diagnostic()]
-pub struct Flow(#[label] pub Span);
+use oxc_diagnostics::OxcDiagnostic;
+use oxc_span::Span;
 
-#[derive(Debug, Error, Diagnostic)]
-#[error("Unexpected token")]
-#[diagnostic()]
-pub struct UnexpectedToken(#[label] pub Span);
+use crate::modifiers::Modifier;
 
-#[derive(Debug, Error, Diagnostic)]
-#[error("Expected `{0}` but found `{1}`")]
-#[diagnostic()]
-pub struct ExpectToken(pub &'static str, pub &'static str, #[label("`{0}` expected")] pub Span);
+#[inline]
+fn ts_error<C, M>(code: C, message: M) -> OxcDiagnostic
+where
+    C: Into<Cow<'static, str>>,
+    M: Into<Cow<'static, str>>,
+{
+    OxcDiagnostic::error(message).with_error_code("TS", code)
+}
 
-#[derive(Debug, Error, Diagnostic)]
-#[error("Invalid escape sequence")]
-pub struct InvalidEscapeSequence(#[label] pub Span);
+#[cold]
+pub fn redeclaration(x0: &str, declare_span: Span, redeclare_span: Span) -> OxcDiagnostic {
+    OxcDiagnostic::error(format!("Identifier `{x0}` has already been declared")).with_labels([
+        declare_span.label(format!("`{x0}` has already been declared here")),
+        redeclare_span.label("It can not be redeclared here"),
+    ])
+}
 
-#[derive(Debug, Error, Diagnostic)]
-#[error("Invalid Unicode escape sequence")]
-pub struct UnicodeEscapeSequence(#[label] pub Span);
+#[cold]
+pub fn overlong_source() -> OxcDiagnostic {
+    OxcDiagnostic::error("Source length exceeds 4 GiB limit")
+}
 
-#[derive(Debug, Error, Diagnostic)]
-#[error("Invalid Character `{0}`")]
-pub struct InvalidCharacter(pub char, #[label] pub Span);
+#[cold]
+pub fn flow(span: Span) -> OxcDiagnostic {
+    OxcDiagnostic::error("Flow is not supported").with_label(span)
+}
 
-#[derive(Debug, Error, Diagnostic)]
-#[error("Invalid characters after number")]
-pub struct InvalidNumberEnd(#[label] pub Span);
+#[cold]
+pub fn unexpected_token(span: Span) -> OxcDiagnostic {
+    OxcDiagnostic::error("Unexpected token").with_label(span)
+}
 
-#[derive(Debug, Error, Diagnostic)]
-#[error("Unterminated multiline comment")]
-pub struct UnterminatedMultiLineComment(#[label] pub Span);
+#[cold]
+pub fn expect_token(x0: &str, x1: &str, span: Span) -> OxcDiagnostic {
+    OxcDiagnostic::error(format!("Expected `{x0}` but found `{x1}`"))
+        .with_label(span.label(format!("`{x0}` expected")))
+}
 
-#[derive(Debug, Error, Diagnostic)]
-#[error("Unterminated string")]
-pub struct UnterminatedString(#[label] pub Span);
+#[cold]
+pub fn invalid_escape_sequence(span: Span) -> OxcDiagnostic {
+    OxcDiagnostic::error("Invalid escape sequence").with_label(span)
+}
 
-#[derive(Debug, Error, Diagnostic)]
-#[error("Unexpected flag {0} in regular expression literal")]
-pub struct RegExpFlag(pub char, #[label] pub Span);
+#[cold]
+pub fn unicode_escape_sequence(span: Span) -> OxcDiagnostic {
+    OxcDiagnostic::error("Invalid Unicode escape sequence").with_label(span)
+}
 
-#[derive(Debug, Error, Diagnostic)]
-#[error("Flag {0} is mentioned twice in regular expression literal")]
-pub struct RegExpFlagTwice(pub char, #[label] pub Span);
+#[cold]
+pub fn invalid_character(x0: char, span1: Span) -> OxcDiagnostic {
+    OxcDiagnostic::error(format!("Invalid Character `{x0}`")).with_label(span1)
+}
 
-#[derive(Debug, Error, Diagnostic)]
-#[error("Unexpected end of file")]
-pub struct UnexpectedEnd(#[label] pub Span);
+#[cold]
+pub fn invalid_number_end(span: Span) -> OxcDiagnostic {
+    OxcDiagnostic::error("Invalid characters after number").with_label(span)
+}
 
-#[derive(Debug, Error, Diagnostic)]
-#[error("Unterminated regular expression")]
-pub struct UnterminatedRegExp(#[label] pub Span);
+#[cold]
+pub fn unterminated_multi_line_comment(span: Span) -> OxcDiagnostic {
+    OxcDiagnostic::error("Unterminated multiline comment").with_label(span)
+}
 
-#[derive(Debug, Error, Diagnostic)]
-#[error("Invalid Number {0}")]
-pub struct InvalidNumber(pub &'static str, #[label] pub Span);
+#[cold]
+pub fn unterminated_string(span: Span) -> OxcDiagnostic {
+    OxcDiagnostic::error("Unterminated string").with_label(span)
+}
 
-#[derive(Debug, Error, Diagnostic)]
-#[error("Keywords cannot contain escape characters")]
-#[diagnostic()]
-pub struct EscapedKeyword(#[label] pub Span);
+#[cold]
+pub fn reg_exp_flag(x0: char, span1: Span) -> OxcDiagnostic {
+    OxcDiagnostic::error(format!("Unexpected flag {x0} in regular expression literal"))
+        .with_label(span1)
+}
 
-#[derive(Debug, Error, Diagnostic)]
-#[error("Expected a semicolon or an implicit semicolon after a statement, but found none")]
-#[diagnostic(help("Try insert a semicolon here"))]
-pub struct AutoSemicolonInsertion(#[label] pub Span);
+#[cold]
+pub fn reg_exp_flag_twice(x0: char, span1: Span) -> OxcDiagnostic {
+    OxcDiagnostic::error(format!("Flag {x0} is mentioned twice in regular expression literal"))
+        .with_label(span1)
+}
 
-#[derive(Debug, Error, Diagnostic)]
-#[error("Line terminator not permitted before arrow")]
-#[diagnostic()]
-pub struct LineterminatorBeforeArrow(#[label] pub Span);
+#[cold]
+pub fn unexpected_end(span: Span) -> OxcDiagnostic {
+    OxcDiagnostic::error("Unexpected end of file").with_label(span)
+}
 
-#[derive(Debug, Error, Diagnostic)]
-#[error("Missing initializer in destructuring declaration")]
-#[diagnostic()]
-pub struct InvalidDestrucuringDeclaration(#[label] pub Span);
+#[cold]
+pub fn unterminated_reg_exp(span: Span) -> OxcDiagnostic {
+    OxcDiagnostic::error("Unterminated regular expression").with_label(span)
+}
 
-#[derive(Debug, Error, Diagnostic)]
-#[error("Missing initializer in const declaration")]
-#[diagnostic()]
-pub struct MissinginitializerInConst(#[label] pub Span);
+#[cold]
+pub fn invalid_number(x0: &str, span1: Span) -> OxcDiagnostic {
+    OxcDiagnostic::error(format!("Invalid Number {x0}")).with_label(span1)
+}
 
-#[derive(Debug, Error, Diagnostic)]
-#[error("Lexical declaration cannot appear in a single-statement context")]
-#[diagnostic(help("Wrap this declaration in a block statement"))]
-pub struct LexicalDeclarationSingleStatement(#[label] pub Span);
+#[cold]
+pub fn escaped_keyword(span: Span) -> OxcDiagnostic {
+    OxcDiagnostic::error("Keywords cannot contain escape characters").with_label(span)
+}
 
-#[derive(Debug, Error, Diagnostic)]
-#[error("Async functions can only be declared at the top level or inside a block")]
-#[diagnostic()]
-pub struct AsyncFunctionDeclaration(#[label] pub Span);
+#[cold]
+pub fn auto_semicolon_insertion(span: Span) -> OxcDiagnostic {
+    OxcDiagnostic::error(
+        "Expected a semicolon or an implicit semicolon after a statement, but found none",
+    )
+    .with_help("Try insert a semicolon here")
+    .with_label(span)
+}
 
-#[derive(Debug, Error, Diagnostic)]
-#[error("Generators can only be declared at the top level or inside a block")]
-#[diagnostic()]
-pub struct GeneratorFunctionDeclaration(#[label] pub Span);
+#[cold]
+pub fn lineterminator_before_arrow(span: Span) -> OxcDiagnostic {
+    OxcDiagnostic::error("Line terminator not permitted before arrow").with_label(span)
+}
 
-#[derive(Debug, Error, Diagnostic)]
-#[error("`await` is only allowed within async functions and at the top levels of modules")]
-#[diagnostic()]
-pub struct AwaitExpression(#[label] pub Span);
+#[cold]
+pub fn invalid_destrucuring_declaration(span: Span) -> OxcDiagnostic {
+    OxcDiagnostic::error("Missing initializer in destructuring declaration").with_label(span)
+}
 
-#[derive(Debug, Error, Diagnostic)]
-#[error("A 'yield' expression is only allowed in a generator body.")]
-#[diagnostic()]
-pub struct YieldExpression(#[label] pub Span);
+#[cold]
+pub fn missinginitializer_in_const(span: Span) -> OxcDiagnostic {
+    OxcDiagnostic::error("Missing initializer in const declaration").with_label(span)
+}
 
-#[derive(Debug, Error, Diagnostic)]
-#[error("Invalid class declaration")]
-#[diagnostic(help("Classes can only be declared at top level or inside a block"))]
-pub struct ClassDeclaration(#[label] pub Span);
+#[cold]
+pub fn lexical_declaration_single_statement(span: Span) -> OxcDiagnostic {
+    OxcDiagnostic::error("Lexical declaration cannot appear in a single-statement context")
+        .with_help("Wrap this declaration in a block statement")
+        .with_label(span)
+}
 
-#[derive(Debug, Error, Diagnostic)]
-#[error("A rest element must be last in a destructuring pattern")]
-#[diagnostic()]
-pub struct RestElementLast(#[label] pub Span);
+#[cold]
+pub fn async_function_declaration(span: Span) -> OxcDiagnostic {
+    OxcDiagnostic::error("Async functions can only be declared at the top level or inside a block")
+        .with_label(span)
+}
 
-#[derive(Debug, Error, Diagnostic)]
-#[error("A rest parameter must be last in a parameter list")]
-#[diagnostic()]
-pub struct RestParameterLast(#[label] pub Span);
+#[cold]
+pub fn generator_function_declaration(span: Span) -> OxcDiagnostic {
+    OxcDiagnostic::error("Generators can only be declared at the top level or inside a block")
+        .with_label(span)
+}
 
-#[derive(Debug, Error, Diagnostic)]
-#[error("Spread must be last element")]
-#[diagnostic()]
-pub struct SpreadLastElement(#[label] pub Span);
+#[cold]
+pub fn await_expression(span: Span) -> OxcDiagnostic {
+    OxcDiagnostic::error(
+        "`await` is only allowed within async functions and at the top levels of modules",
+    )
+    .with_label(span)
+}
 
-#[derive(Debug, Error, Diagnostic)]
-#[error("Unexpected trailing comma after rest element")]
-#[diagnostic()]
-pub struct RestElementTrailingComma(#[label] pub Span);
+#[cold]
+pub fn yield_expression(span: Span) -> OxcDiagnostic {
+    OxcDiagnostic::error("A 'yield' expression is only allowed in a generator body.")
+        .with_label(span)
+}
 
-#[derive(Debug, Error, Diagnostic)]
-#[error("Invalid rest element")]
-#[diagnostic(help("Expected identifier in rest element"))]
-pub struct InvalidRestElement(#[label] pub Span);
+#[cold]
+pub fn class_declaration(span: Span) -> OxcDiagnostic {
+    OxcDiagnostic::error("Invalid class declaration")
+        .with_help("Classes can only be declared at top level or inside a block")
+        .with_label(span)
+}
 
-#[derive(Debug, Error, Diagnostic)]
-#[error("Cannot assign to this expression")]
-#[diagnostic()]
-pub struct InvalidAssignment(#[label] pub Span);
+/// A class member cannot have the 'const' keyword. ts(1248)
+#[cold]
+pub fn const_class_member(span: Span) -> OxcDiagnostic {
+    ts_error("1248", "A class member cannot have the 'const' keyword.")
+        .with_help("Did you mean `readonly`?")
+        .with_label(span)
+}
 
-#[derive(Debug, Error, Diagnostic)]
-#[error("Optional chaining cannot appear in the callee of new expressions")]
-#[diagnostic()]
-pub struct NewOptionalChain(#[label] pub Span);
+#[cold]
+pub fn binding_rest_element_last(span: Span) -> OxcDiagnostic {
+    OxcDiagnostic::error("A rest element must be last in a destructuring pattern").with_label(span)
+}
 
-#[derive(Debug, Error, Diagnostic)]
-#[error("The left-hand side of a `for...of` statement may not be `async`")]
-#[diagnostic()]
-pub struct ForLoopAsyncOf(#[label] pub Span);
+#[cold]
+pub fn rest_parameter_last(span: Span) -> OxcDiagnostic {
+    OxcDiagnostic::error("A rest parameter must be last in a parameter list").with_label(span)
+}
 
-#[derive(Debug, Error, Diagnostic)]
-#[error("await can only be used in conjunction with `for...of` statements")]
-#[diagnostic()]
-pub struct ForAwait(#[label] pub Span);
+#[cold]
+pub fn spread_last_element(span: Span) -> OxcDiagnostic {
+    OxcDiagnostic::error("Spread must be last element").with_label(span)
+}
 
-#[derive(Debug, Error, Diagnostic)]
-#[error("Cannot use new with dynamic import")]
-#[diagnostic()]
-pub struct NewDynamicImport(#[label] pub Span);
+#[cold]
+pub fn binding_rest_element_trailing_comma(span: Span) -> OxcDiagnostic {
+    OxcDiagnostic::error("Unexpected trailing comma after rest element").with_label(span)
+}
 
-#[derive(Debug, Error, Diagnostic)]
-#[error("Classes can't have an element named '#constructor'")]
-#[diagnostic()]
-pub struct PrivateNameConstructor(#[label] pub Span);
+#[cold]
+pub fn invalid_binding_rest_element(span: Span) -> OxcDiagnostic {
+    OxcDiagnostic::error("Invalid rest element")
+        .with_help("Expected identifier in rest element")
+        .with_label(span)
+}
 
-#[derive(Debug, Error, Diagnostic)]
-#[error("Classes may not have a static property named prototype")]
-#[diagnostic()]
-pub struct StaticPrototype(#[label] pub Span);
+#[cold]
+pub fn a_rest_parameter_cannot_be_optional(span: Span) -> OxcDiagnostic {
+    OxcDiagnostic::error("A rest parameter cannot be optional").with_label(span)
+}
 
-#[derive(Debug, Error, Diagnostic)]
-#[error("Constructor can't have get/set modifier")]
-#[diagnostic()]
-pub struct ConstructorGetterSetter(#[label] pub Span);
+#[cold]
+pub fn invalid_assignment(span: Span) -> OxcDiagnostic {
+    OxcDiagnostic::error("Cannot assign to this expression").with_label(span)
+}
 
-#[derive(Debug, Error, Diagnostic)]
-#[error("Constructor can't be an async method")]
-#[diagnostic()]
-pub struct ConstructorAsync(#[label] pub Span);
+#[cold]
+pub fn new_optional_chain(span: Span) -> OxcDiagnostic {
+    OxcDiagnostic::error("Optional chaining cannot appear in the callee of new expressions")
+        .with_label(span)
+}
 
-#[derive(Debug, Error, Diagnostic)]
-#[error("Cannot use `{0}` as an identifier in an async context")]
-#[diagnostic()]
-pub struct IdentifierAsync(pub &'static str, #[label] pub Span);
+#[cold]
+pub fn for_loop_async_of(span: Span) -> OxcDiagnostic {
+    OxcDiagnostic::error("The left-hand side of a `for...of` statement may not be `async`")
+        .with_label(span)
+}
 
-#[derive(Debug, Error, Diagnostic)]
-#[error("Cannot use `{0}` as an identifier in a generator context")]
-#[diagnostic()]
-pub struct IdentifierGenerator(pub &'static str, #[label] pub Span);
+#[cold]
+pub fn for_await(span: Span) -> OxcDiagnostic {
+    OxcDiagnostic::error("await can only be used in conjunction with `for...of` statements")
+        .with_label(span)
+}
 
-#[derive(Debug, Error, Diagnostic)]
-#[error("Constructor can't be a generator")]
-#[diagnostic()]
-pub struct ConstructorGenerator(#[label] pub Span);
+#[cold]
+pub fn new_dynamic_import(span: Span) -> OxcDiagnostic {
+    OxcDiagnostic::error("Cannot use new with dynamic import").with_label(span)
+}
 
-#[derive(Debug, Error, Diagnostic)]
-#[error("Classes can't have a field named 'constructor'")]
-#[diagnostic()]
-pub struct FieldConstructor(#[label] pub Span);
+#[cold]
+pub fn private_name_constructor(span: Span) -> OxcDiagnostic {
+    OxcDiagnostic::error("Classes can't have an element named '#constructor'").with_label(span)
+}
 
-#[derive(Debug, Error, Diagnostic)]
-#[error("An export name cannot include a unicode lone surrogate")]
-#[diagnostic()]
-pub struct ExportLoneSurrogate(#[label] pub Span);
+#[cold]
+pub fn static_prototype(span: Span) -> OxcDiagnostic {
+    OxcDiagnostic::error("Classes may not have a static property named prototype").with_label(span)
+}
 
-#[derive(Debug, Error, Diagnostic)]
-#[error("A string literal cannot be used as an exported binding without `from`")]
-#[diagnostic(help("Did you mean `export {{ '{0}' as '{1}' }} from 'some-module'`?"))]
-pub struct ExportNamedString(pub Atom, pub Atom, #[label] pub Span);
+#[cold]
+pub fn constructor_getter_setter(span: Span) -> OxcDiagnostic {
+    OxcDiagnostic::error("Constructor can't have get/set modifier").with_label(span)
+}
 
-#[derive(Debug, Error, Diagnostic)]
-#[error("Bad escape sequence in untagged template literal")]
-#[diagnostic()]
-pub struct TemplateLiteral(#[label] pub Span);
+#[cold]
+pub fn constructor_async(span: Span) -> OxcDiagnostic {
+    OxcDiagnostic::error("Constructor can't be an async method").with_label(span)
+}
 
-#[derive(Debug, Error, Diagnostic)]
-#[error("Empty parenthesized expression")]
-#[diagnostic()]
-pub struct EmptyParenthesizedExpression(#[label] pub Span);
+#[cold]
+pub fn optional_accessor_property(span: Span) -> OxcDiagnostic {
+    ts_error("1276", "An 'accessor' property cannot be declared optional.").with_label(span)
+}
 
-#[derive(Debug, Error, Diagnostic)]
-#[error("Illegal newline after {0}")]
-#[diagnostic()]
-pub struct IllegalNewline(
-    pub &'static str,
-    #[label("{0} starts here")] pub Span,
-    #[label("A newline is not expected here")] pub Span,
-);
+#[cold]
+pub fn optional_definite_property(span: Span) -> OxcDiagnostic {
+    // NOTE: could not find an error code when tsc parses this; its parser panics.
+    OxcDiagnostic::error("A property cannot be both optional and definite.")
+        .with_label(span)
+        .with_help("Remove either the `?` or the `!`")
+}
 
-#[derive(Debug, Error, Diagnostic)]
-#[error("Tagged template expressions are not permitted in an optional chain")]
-#[diagnostic()]
-pub struct OptionalChainTaggedTemplate(#[label] pub Span);
+#[cold]
+pub fn identifier_async(x0: &str, span1: Span) -> OxcDiagnostic {
+    OxcDiagnostic::error(format!("Cannot use `{x0}` as an identifier in an async context"))
+        .with_label(span1)
+}
 
-#[derive(Debug, Error, Diagnostic)]
-#[error("A 'get' accessor must not have any formal parameters.")]
-#[diagnostic()]
-pub struct GetterParameters(#[label] pub Span);
+#[cold]
+pub fn identifier_generator(x0: &str, span1: Span) -> OxcDiagnostic {
+    OxcDiagnostic::error(format!("Cannot use `{x0}` as an identifier in a generator context"))
+        .with_label(span1)
+}
 
-#[derive(Debug, Error, Diagnostic)]
-#[error("A 'set' accessor must have exactly one parameter.")]
-#[diagnostic()]
-pub struct SetterParameters(#[label] pub Span);
+#[cold]
+pub fn identifier_reserved_word(span: Span, reserved: &str) -> OxcDiagnostic {
+    OxcDiagnostic::error(format!(
+        "Identifier expected. '{reserved}' is a reserved word that cannot be used here."
+    ))
+    .with_label(span)
+}
 
-#[derive(Debug, Error, Diagnostic)]
-#[error("'super' can only be used with function calls or in property accesses")]
-#[diagnostic(help("replace with `super()` or `super.prop` or `super[prop]`"))]
-pub struct UnexpectedSuper(#[label] pub Span);
+#[cold]
+pub fn constructor_generator(span: Span) -> OxcDiagnostic {
+    OxcDiagnostic::error("Constructor can't be a generator").with_label(span)
+}
 
-#[derive(Debug, Error, Diagnostic)]
-#[error("Expected function name")]
-#[diagnostic(help("Function name is required in function declaration or named export"))]
-pub struct ExpectFunctionName(#[label] pub Span);
+#[cold]
+pub fn field_constructor(span: Span) -> OxcDiagnostic {
+    OxcDiagnostic::error("Classes can't have a field named 'constructor'").with_label(span)
+}
 
-#[derive(Debug, Error, Diagnostic)]
-#[error("Missing catch or finally clause")]
-#[diagnostic()]
-pub struct ExpectCatchFinally(#[label] pub Span);
+#[cold]
+pub fn export_lone_surrogate(span: Span) -> OxcDiagnostic {
+    OxcDiagnostic::error("An export name cannot include a unicode lone surrogate").with_label(span)
+}
 
-#[derive(Debug, Error, Diagnostic)]
-#[error("TS1095: A 'set' accessor cannot have a return type annotation")]
-#[diagnostic()]
-pub struct ASetAccessorCannotHaveAReturnTypeAnnotation(#[label] pub Span);
+#[cold]
+pub fn export_named_string(x0: &str, x1: &str, span2: Span) -> OxcDiagnostic {
+    OxcDiagnostic::error("A string literal cannot be used as an exported binding without `from`")
+        .with_help(format!("Did you mean `export {{ {x0} as {x1} }} from 'some-module'`?"))
+        .with_label(span2)
+}
 
-#[derive(Debug, Error, Diagnostic)]
-#[error("TS1108: A 'return' statement can only be used within a function body")]
-#[diagnostic()]
-pub struct ReturnStatementOnlyInFunctionBody(#[label] pub Span);
+#[cold]
+pub fn export_reserved_word(x0: &str, x1: &str, span2: Span) -> OxcDiagnostic {
+    OxcDiagnostic::error("A reserved word cannot be used as an exported binding without `from`")
+        .with_help(format!("Did you mean `export {{ {x0} as {x1} }} from 'some-module'`?"))
+        .with_label(span2)
+}
 
-#[derive(Debug, Error, Diagnostic)]
-#[error("TS18007: JSX expressions may not use the comma operator.")]
-#[diagnostic(help("Did you mean to write an array?"))]
-pub struct JSXExpressionsMayNotUseTheCommaOperator(#[label] pub Span);
+#[cold]
+pub fn template_literal(span: Span) -> OxcDiagnostic {
+    OxcDiagnostic::error("Bad escape sequence in untagged template literal").with_label(span)
+}
 
-#[derive(Debug, Error, Diagnostic)]
-#[error("Line terminator not permitted before using declaration.")]
-#[diagnostic()]
-pub struct LineTerminatorBeforeUsingDeclaration(#[label] pub Span);
+#[cold]
+pub fn empty_parenthesized_expression(span: Span) -> OxcDiagnostic {
+    OxcDiagnostic::error("Empty parenthesized expression").with_label(span)
+}
 
-#[derive(Debug, Error, Diagnostic)]
-#[error("Await is not allowed in using declarations.")]
-#[diagnostic()]
-pub struct AwaitInUsingDeclaration(#[label] pub Span);
+#[cold]
+pub fn illegal_newline(x0: &str, span1: Span, span2: Span) -> OxcDiagnostic {
+    OxcDiagnostic::error(format!("Illegal newline after {x0}")).with_labels([
+        span1.label(format!("{x0} starts here")),
+        span2.label("A newline is not expected here"),
+    ])
+}
 
-#[derive(Debug, Error, Diagnostic)]
-#[error("Using declarations may not have binding patterns.")]
-#[diagnostic()]
-pub struct InvalidIdentifierInUsingDeclaration(#[label] pub Span);
+#[cold]
+pub fn optional_chain_tagged_template(span: Span) -> OxcDiagnostic {
+    OxcDiagnostic::error("Tagged template expressions are not permitted in an optional chain")
+        .with_label(span)
+}
 
-#[derive(Debug, Error, Diagnostic)]
-#[error("The left-hand side of a for...in statement cannot be an await using declaration.")]
-#[diagnostic()]
-pub struct AwaitUsingDeclarationNotAllowedInForInStatement(#[label] pub Span);
+#[cold]
+pub fn ts_constructor_this_parameter(span: Span) -> OxcDiagnostic {
+    ts_error("2681", "A constructor cannot have a `this` parameter.").with_label(span)
+}
 
-#[derive(Debug, Error, Diagnostic)]
-#[error("The left-hand side of a for...in statement cannot be an using declaration.")]
-#[diagnostic()]
-pub struct UsingDeclarationNotAllowedInForInStatement(#[label] pub Span);
+#[cold]
+pub fn ts_constructor_type_parameter(span: Span) -> OxcDiagnostic {
+    ts_error("1092", "Type parameters cannot appear on a constructor declaration").with_label(span)
+}
 
-#[derive(Debug, Error, Diagnostic)]
-#[error("Using declarations must have an initializer.")]
-#[diagnostic()]
-pub struct UsingDeclarationsMustBeInitialized(#[label] pub Span);
+#[cold]
+pub fn ts_arrow_function_this_parameter(span: Span) -> OxcDiagnostic {
+    ts_error("2730", "An arrow function cannot have a `this` parameter.").with_label(span)
+}
+
+#[cold]
+pub fn unexpected_super(span: Span) -> OxcDiagnostic {
+    OxcDiagnostic::error("'super' can only be used with function calls or in property accesses")
+        .with_help("replace with `super()` or `super.prop` or `super[prop]`")
+        .with_label(span)
+}
+
+#[cold]
+pub fn expect_function_name(span: Span) -> OxcDiagnostic {
+    OxcDiagnostic::error("Expected function name")
+        .with_help("Function name is required in function declaration or named export")
+        .with_label(span)
+}
+
+#[cold]
+pub fn expect_catch_finally(span: Span) -> OxcDiagnostic {
+    OxcDiagnostic::error("Missing catch or finally clause").with_label(span)
+}
+
+#[cold]
+pub fn v8_intrinsic_spread_elem(span: Span) -> OxcDiagnostic {
+    OxcDiagnostic::error("V8 runtime calls cannot have spread elements as arguments")
+        .with_label(span)
+}
+
+#[cold]
+pub fn a_set_accessor_cannot_have_a_return_type_annotation(span: Span) -> OxcDiagnostic {
+    ts_error("1095", " A 'set' accessor cannot have a return type annotation.").with_label(span)
+}
+
+#[cold]
+pub fn return_statement_only_in_function_body(span: Span) -> OxcDiagnostic {
+    ts_error("1108", "A 'return' statement can only be used within a function body.")
+        .with_label(span)
+}
+
+#[cold]
+pub fn jsx_expressions_may_not_use_the_comma_operator(span: Span) -> OxcDiagnostic {
+    // OxcDiagnostic::error("TS18007: JSX expressions may not use the comma
+    // operator.")
+    ts_error("18007", "JSX expressions may not use the comma operator")
+        .with_help("Did you mean to write an array?")
+        .with_label(span)
+}
+
+#[cold]
+pub fn line_terminator_before_using_declaration(span: Span) -> OxcDiagnostic {
+    OxcDiagnostic::error("Line terminator not permitted before using declaration.").with_label(span)
+}
+
+#[cold]
+pub fn await_in_using_declaration(span: Span) -> OxcDiagnostic {
+    OxcDiagnostic::error("Await is not allowed in using declarations.").with_label(span)
+}
+
+#[cold]
+pub fn invalid_identifier_in_using_declaration(span: Span) -> OxcDiagnostic {
+    OxcDiagnostic::error("Using declarations may not have binding patterns.").with_label(span)
+}
+
+#[cold]
+pub fn await_using_declaration_not_allowed_in_for_in_statement(span: Span) -> OxcDiagnostic {
+    OxcDiagnostic::error(
+        "The left-hand side of a for...in statement cannot be an await using declaration.",
+    )
+    .with_label(span)
+}
+
+#[cold]
+pub fn using_declaration_not_allowed_in_for_in_statement(span: Span) -> OxcDiagnostic {
+    OxcDiagnostic::error(
+        "The left-hand side of a for...in statement cannot be an using declaration.",
+    )
+    .with_label(span)
+}
+
+#[cold]
+pub fn using_declarations_must_be_initialized(span: Span) -> OxcDiagnostic {
+    OxcDiagnostic::error("Using declarations must have an initializer.").with_label(span)
+}
+
+/// TS(1093)
+#[cold]
+pub fn static_constructor(span: Span) -> OxcDiagnostic {
+    ts_error("1089", "`static` modifier cannot appear on a constructor declaration.")
+        .with_label(span)
+}
+
+#[cold]
+pub fn jsx_element_no_match(span: Span, span1: Span, name: &str) -> OxcDiagnostic {
+    OxcDiagnostic::error(format!("Expected corresponding JSX closing tag for '{name}'."))
+        .with_labels([span, span1])
+}
+
+#[cold]
+pub fn cover_initialized_name(span: Span) -> OxcDiagnostic {
+    OxcDiagnostic::error("Invalid assignment in object literal")
+.with_help("Did you mean to use a ':'? An '=' can only follow a property name when the containing object literal is part of a destructuring pattern.")
+.with_label(span)
+}
+
+#[cold]
+pub fn duplicate_export(x0: &str, span1: Span, span2: Span) -> OxcDiagnostic {
+    OxcDiagnostic::error(format!("Duplicated export '{x0}'")).with_labels([
+        span1.label("Export has already been declared here"),
+        span2.label("It cannot be redeclared here"),
+    ])
+}
+
+#[cold]
+pub fn import_meta(span: Span) -> OxcDiagnostic {
+    OxcDiagnostic::error("The only valid meta property for import is import.meta").with_label(span)
+}
+
+#[cold]
+pub fn new_target(span: Span) -> OxcDiagnostic {
+    OxcDiagnostic::error("The only valid meta property for new is new.target").with_label(span)
+}
+
+#[cold]
+pub fn private_in_private(span: Span) -> OxcDiagnostic {
+    OxcDiagnostic::error("Unexpected right-hand side of private-in expression").with_label(span)
+}
+
+// ================================= MODIFIERS =================================
+
+#[cold]
+pub fn modifier_cannot_be_used_here(modifier: &Modifier) -> OxcDiagnostic {
+    OxcDiagnostic::error(format!("'{}' modifier cannot be used here.", modifier.kind))
+        .with_label(modifier.span)
+}
+
+/// TS(1030)
+#[cold]
+pub fn modifier_already_seen(modifier: &Modifier) -> OxcDiagnostic {
+    // OxcDiagnostic::error(format!("TS1030: '{}' modifier already seen.", modifier.kind))
+    ts_error("1030", format!("{}' modifier already seen.", modifier.kind))
+        .with_label(modifier.span)
+        .with_help("Remove the duplicate modifier.")
+}
+
+/// TS(1273)
+#[cold]
+pub fn cannot_appear_on_a_type_parameter(modifier: &Modifier) -> OxcDiagnostic {
+    ts_error("1273", format!("'{}' modifier cannot be used on a type parameter.", modifier.kind))
+        .with_label(modifier.span)
+}
+
+/// TS(1090)
+pub fn cannot_appear_on_a_parameter(modifier: &Modifier) -> OxcDiagnostic {
+    ts_error("1090", format!("'{}' modifier cannot appear on a parameter.", modifier.kind))
+        .with_label(modifier.span)
+}
+
+/// TS(1071)
+pub fn cannot_appear_on_an_index_signature(modifier: &Modifier) -> OxcDiagnostic {
+    ts_error("1071", format!("'{}' modifier cannot appear on an index signature.", modifier.kind))
+        .with_label(modifier.span)
+}
+
+/// TS(1354)
+#[cold]
+pub fn readonly_in_array_or_tuple_type(span: Span) -> OxcDiagnostic {
+    ts_error("1354", "'readonly' type modifier is only permitted on array and tuple literal types.")
+        .with_label(span)
+}
+
+/// TS(18010)
+#[cold]
+pub fn accessibility_modifier_on_private_property(modifier: &Modifier) -> OxcDiagnostic {
+    ts_error("18010", "An accessibility modifier cannot be used with a private identifier.")
+        .with_label(modifier.span)
+}
+
+// ================================== TS ENUMS =================================
+
+/// Computed property names are not allowed in enums.ts(1164)
+#[cold]
+pub fn computed_property_names_not_allowed_in_enums(span: Span) -> OxcDiagnostic {
+    ts_error("1164", "Computed property names are not allowed in enums.").with_label(span)
+}
+/// An enum member cannot have a numeric name.ts(2452)
+#[cold]
+pub fn enum_member_cannot_have_numeric_name(span: Span) -> OxcDiagnostic {
+    ts_error("2452", "An enum member cannot have a numeric name.").with_label(span)
+}

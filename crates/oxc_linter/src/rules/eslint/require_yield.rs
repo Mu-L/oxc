@@ -1,17 +1,13 @@
 use oxc_ast::AstKind;
-use oxc_diagnostics::{
-    miette::{self, Diagnostic},
-    thiserror::Error,
-};
+use oxc_diagnostics::OxcDiagnostic;
 use oxc_macros::declare_oxc_lint;
-use oxc_span::{GetSpan, Span};
+use oxc_span::Span;
 
-use crate::{context::LintContext, rule::Rule, AstNode};
+use crate::{AstNode, context::LintContext, rule::Rule};
 
-#[derive(Debug, Error, Diagnostic)]
-#[error("eslint(require-yield): This generator function does not have 'yield'")]
-#[diagnostic(severity(warning))]
-struct RequireYieldDiagnostic(#[label] pub Span);
+fn require_yield_diagnostic(span: Span) -> OxcDiagnostic {
+    OxcDiagnostic::warn("This generator function does not have 'yield'").with_label(span)
+}
 
 #[derive(Debug, Default, Clone)]
 pub struct RequireYield;
@@ -32,17 +28,20 @@ declare_oxc_lint!(
     /// }
     /// ```
     RequireYield,
+    eslint,
     correctness
 );
 
 impl Rule for RequireYield {
     fn run<'a>(&self, node: &AstNode<'a>, ctx: &LintContext<'a>) {
-        let kind = node.kind();
-        if (matches!(kind, AstKind::Function(func) if func.generator && func.body.as_ref().is_some_and(|body| !body.statements.is_empty()))
-            || matches!(kind, AstKind::ArrowExpression(arrow) if arrow.generator && !arrow.body.statements.is_empty()))
-            && !node.flags().has_yield()
-        {
-            ctx.diagnostic(RequireYieldDiagnostic(kind.span()));
+        if let AstKind::Function(func) = node.kind() {
+            if !node.flags().has_yield()
+                && func.generator
+                && func.body.as_ref().is_some_and(|body| !body.statements.is_empty())
+            {
+                let span = func.id.as_ref().map_or_else(|| func.span, |ident| ident.span);
+                ctx.diagnostic(require_yield_diagnostic(span));
+            }
         }
     }
 }
@@ -52,25 +51,27 @@ fn test() {
     use crate::tester::Tester;
 
     let pass = vec![
-        ("function foo() { return 0; }", None),
-        ("function* foo() { yield 0; }", None),
-        ("function* foo() { }", None),
-        ("(function* foo() { yield 0; })();", None),
-        ("(function* foo() { })();", None),
-        ("var obj = { *foo() { yield 0; } };", None),
-        ("var obj = { *foo() { } };", None),
-        ("class A { *foo() { yield 0; } };", None),
-        ("class A { *foo() { } };", None),
+        "function foo() { return 0; }",
+        "function* foo() { yield 0; }",
+        "function* foo() { }",
+        "(function* foo() { yield 0; })();",
+        "(function* foo() { })();",
+        "function* foo() { while (true) { yield 0; } }",
+        "var obj = { *foo() { yield 0; } };",
+        "var obj = { *foo() { } };",
+        "class A { *foo() { yield 0; } };",
+        "class A { *foo() { } };",
+        "() => {}",
     ];
 
     let fail = vec![
-        ("function* foo() { return 0; }", None),
-        ("(function* foo() { return 0; })();", None),
-        ("var obj = { *foo() { return 0; } }", None),
-        ("class A { *foo() { return 0; } }", None),
-        ("function* foo() { function* bar() { yield 0; } }", None),
-        ("function* foo() { function* bar() { return 0; } yield 0; }", None),
+        "function* foo() { return 0; }",
+        "(function* foo() { return 0; })();",
+        "var obj = { *foo() { return 0; } }",
+        "class A { *foo() { return 0; } }",
+        "function* foo() { function* bar() { yield 0; } }",
+        "function* foo() { function* bar() { return 0; } yield 0; }",
     ];
 
-    Tester::new(RequireYield::NAME, pass, fail).test_and_snapshot();
+    Tester::new(RequireYield::NAME, RequireYield::PLUGIN, pass, fail).test_and_snapshot();
 }

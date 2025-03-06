@@ -1,16 +1,13 @@
 use oxc_ast::AstKind;
-use oxc_diagnostics::{
-    miette::{self, Diagnostic},
-    thiserror::Error,
-};
+use oxc_diagnostics::OxcDiagnostic;
 use oxc_macros::declare_oxc_lint;
 use oxc_span::Span;
 
-use crate::{context::LintContext, rule::Rule, AstNode};
+use crate::{AstNode, context::LintContext, rule::Rule};
 
-#[derive(Debug, Error, Diagnostic)]
-#[error("eslint(no-setter-return): Setter cannot return a value")]
-struct NoSetterReturnDiagnostic(#[label] pub Span);
+fn no_setter_return_diagnostic(span: Span) -> OxcDiagnostic {
+    OxcDiagnostic::warn("Setter cannot return a value").with_label(span)
+}
 
 #[derive(Debug, Default, Clone)]
 pub struct NoSetterReturn;
@@ -36,14 +33,28 @@ declare_oxc_lint!(
     /// }
     /// ```
     NoSetterReturn,
+    eslint,
     correctness
 );
 
 impl Rule for NoSetterReturn {
     fn run<'a>(&self, node: &AstNode<'a>, ctx: &LintContext<'a>) {
-        let AstKind::ReturnStatement(stmt) = node.kind() else { return };
-        if stmt.argument.is_some() && ctx.scopes().get_flags(node.scope_id()).is_set_accessor() {
-            ctx.diagnostic(NoSetterReturnDiagnostic(stmt.span));
+        let AstKind::ReturnStatement(stmt) = node.kind() else {
+            return;
+        };
+        if stmt.argument.is_none() {
+            return;
+        }
+
+        for scope_id in ctx.scopes().ancestors(node.scope_id()) {
+            let flags = ctx.scopes().get_flags(scope_id);
+            if flags.is_set_accessor() {
+                ctx.diagnostic(no_setter_return_diagnostic(stmt.span));
+            } else if flags.is_function() {
+                break;
+            } else {
+                continue;
+            }
         }
     }
 }
@@ -282,5 +293,5 @@ fn test() {
         // ("(Object?.defineProperty)(foo, 'bar', { set(val) { return 1; } })", None),
     ];
 
-    Tester::new(NoSetterReturn::NAME, pass, fail).test_and_snapshot();
+    Tester::new(NoSetterReturn::NAME, NoSetterReturn::PLUGIN, pass, fail).test_and_snapshot();
 }

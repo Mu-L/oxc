@@ -1,41 +1,49 @@
 use oxc_allocator::{Box, Vec};
-use oxc_ast::{ast::*, syntax_directed_operations::PropName};
+use oxc_ast::ast::*;
 use oxc_diagnostics::Result;
-use oxc_span::Span;
+use oxc_ecmascript::PropName;
+use oxc_span::{GetSpan, Span};
 
-use super::list::ClassElements;
-use crate::{diagnostics, lexer::Kind, list::NormalList, Parser, StatementContext};
+use crate::{
+    Context, ParserImpl, StatementContext, diagnostics,
+    lexer::Kind,
+    modifiers::{ModifierFlags, ModifierKind, Modifiers},
+};
 
 type Extends<'a> =
     Vec<'a, (Expression<'a>, Option<Box<'a, TSTypeParameterInstantiation<'a>>>, Span)>;
 
-type Implements<'a> = Vec<'a, Box<'a, TSClassImplements<'a>>>;
+type Implements<'a> = Vec<'a, TSClassImplements<'a>>;
 
 /// Section 15.7 Class Definitions
-impl<'a> Parser<'a> {
+impl<'a> ParserImpl<'a> {
     // `start_span` points at the start of all decoractors and `class` keyword.
     pub(crate) fn parse_class_statement(
         &mut self,
         stmt_ctx: StatementContext,
         start_span: Span,
     ) -> Result<Statement<'a>> {
-        let decl = self.parse_class_declaration(start_span, Modifiers::empty())?;
+        let modifiers = self.parse_modifiers(
+            /* allow_decorators */ true, /* permit_const_as_modifier */ false,
+            /* stop_on_start_of_class_static_block */ true,
+        );
+        let decl = self.parse_class_declaration(start_span, &modifiers)?;
 
         if stmt_ctx.is_single_statement() {
-            self.error(diagnostics::ClassDeclaration(Span::new(
+            self.error(diagnostics::class_declaration(Span::new(
                 decl.span.start,
                 decl.body.span.start,
             )));
         }
 
-        Ok(self.ast.class_declaration(decl))
+        Ok(Statement::ClassDeclaration(decl))
     }
 
     /// Section 15.7 Class Definitions
     pub(crate) fn parse_class_declaration(
         &mut self,
         start_span: Span,
-        modifiers: Modifiers<'a>,
+        modifiers: &Modifiers<'a>,
     ) -> Result<Box<'a, Class<'a>>> {
         self.parse_class(start_span, ClassType::ClassDeclaration, modifiers)
     }
@@ -45,19 +53,19 @@ impl<'a> Parser<'a> {
     ///     class `BindingIdentifier`[?Yield, ?Await]opt `ClassTail`[?Yield, ?Await]
     pub(crate) fn parse_class_expression(&mut self) -> Result<Expression<'a>> {
         let class =
-            self.parse_class(self.start_span(), ClassType::ClassExpression, Modifiers::empty())?;
-        Ok(self.ast.class_expression(class))
+            self.parse_class(self.start_span(), ClassType::ClassExpression, &Modifiers::empty())?;
+        Ok(Expression::ClassExpression(class))
     }
 
     fn parse_class(
         &mut self,
         start_span: Span,
         r#type: ClassType,
-        modifiers: Modifiers<'a>,
+        modifiers: &Modifiers<'a>,
     ) -> Result<Box<'a, Class<'a>>> {
         self.bump_any(); // advance `class`
 
-        let decorators = self.state.consume_decorators();
+        let decorators = self.consume_decorators();
         let start_span = decorators.iter().next().map_or(start_span, |d| d.span);
 
         let id = if self.cur_kind().is_binding_identifier() && !self.at(Kind::Implements) {
@@ -66,8 +74,7 @@ impl<'a> Parser<'a> {
             None
         };
 
-        let type_parameters =
-            if self.ts_enabled() { self.parse_ts_type_parameters()? } else { None };
+        let type_parameters = if self.is_ts { self.parse_ts_type_parameters()? } else { None };
         let (extends, implements) = self.parse_heritage_clause()?;
         let mut super_class = None;
         let mut super_type_parameters = None;
@@ -80,17 +87,24 @@ impl<'a> Parser<'a> {
         }
         let body = self.parse_class_body()?;
 
-        Ok(self.ast.class(
-            r#type,
+        self.verify_modifiers(
+            modifiers,
+            ModifierFlags::DECLARE | ModifierFlags::ABSTRACT,
+            diagnostics::modifier_cannot_be_used_here,
+        );
+
+        Ok(self.ast.alloc_class(
             self.end_span(start_span),
+            r#type,
+            decorators,
             id,
-            super_class,
-            body,
             type_parameters,
+            super_class,
             super_type_parameters,
             implements,
-            decorators,
-            modifiers,
+            body,
+            modifiers.contains_abstract(),
+            modifiers.contains_declare(),
         ))
     }
 
@@ -119,30 +133,30 @@ impl<'a> Parser<'a> {
     /// extends `LeftHandSideExpression`[?Yield, ?Await]
     fn parse_extends_clause(&mut self) -> Result<Extends<'a>> {
         self.bump_any(); // bump `extends`
-        let mut extends = self.ast.new_vec();
+        let mut extends = self.ast.vec();
 
         let span = self.start_span();
-        let mut first_extends = self.parse_lhs_expression()?;
+        let mut first_extends = self.parse_lhs_expression_or_higher()?;
         let first_type_argument;
         if let Expression::TSInstantiationExpression(expr) = first_extends {
             let expr = expr.unbox();
             first_extends = expr.expression;
             first_type_argument = Some(expr.type_parameters);
         } else {
-            first_type_argument = self.parse_ts_type_arguments()?;
+            first_type_argument = self.try_parse_type_arguments()?;
         }
         extends.push((first_extends, first_type_argument, self.end_span(span)));
 
         while self.eat(Kind::Comma) {
             let span = self.start_span();
-            let mut extend = self.parse_lhs_expression()?;
+            let mut extend = self.parse_lhs_expression_or_higher()?;
             let type_argument;
             if let Expression::TSInstantiationExpression(expr) = extend {
                 let expr = expr.unbox();
                 extend = expr.expression;
                 type_argument = Some(expr.type_parameters);
             } else {
-                type_argument = self.parse_ts_type_arguments()?;
+                type_argument = self.try_parse_type_arguments()?;
             }
 
             extends.push((extend, type_argument, self.end_span(span)));
@@ -153,40 +167,43 @@ impl<'a> Parser<'a> {
 
     fn parse_class_body(&mut self) -> Result<Box<'a, ClassBody<'a>>> {
         let span = self.start_span();
-        let mut class_elements = ClassElements::new(self);
-        class_elements.parse(self)?;
-        let body = class_elements.elements;
-        Ok(self.ast.class_body(self.end_span(span), body))
+        let class_elements =
+            self.parse_normal_list(Kind::LCurly, Kind::RCurly, Self::parse_class_element)?;
+        Ok(self.ast.alloc_class_body(self.end_span(span), class_elements))
     }
 
-    pub(crate) fn parse_class_element(&mut self) -> Result<ClassElement<'a>> {
+    pub(crate) fn parse_class_element(&mut self) -> Result<Option<ClassElement<'a>>> {
+        // skip empty class element `;`
+        while self.at(Kind::Semicolon) {
+            self.bump_any();
+        }
+        if self.at(Kind::RCurly) {
+            return Ok(None);
+        }
+
         let span = self.start_span();
 
-        self.eat_decorators()?;
+        let modifiers = self.parse_modifiers(true, true, true);
 
         let mut kind = MethodDefinitionKind::Method;
-        let mut r#async = false;
         let mut generator = false;
 
         let mut key_name = None;
 
-        let modifier = self.parse_class_element_modifiers(false);
-
-        let accessor = self.peek_kind().is_class_element_name_start() && self.eat(Kind::Accessor);
-
-        let accessibility = modifier.accessibility();
-
-        let declare = modifier.declare();
-        let readonly = modifier.readonly();
-        let r#override = modifier.r#override();
-        let r#abstract = modifier.r#abstract();
-        let mut r#static = modifier.r#static();
+        let accessibility = modifiers.accessibility();
+        let accessor = modifiers.contains(ModifierKind::Accessor);
+        let declare = modifiers.contains(ModifierKind::Declare);
+        let readonly = modifiers.contains(ModifierKind::Readonly);
+        let r#override = modifiers.contains(ModifierKind::Override);
+        let r#abstract = modifiers.contains(ModifierKind::Abstract);
+        let mut r#static = modifiers.contains(ModifierKind::Static);
+        let mut r#async = modifiers.contains(ModifierKind::Async);
 
         if self.at(Kind::Static) {
             // static { block }
             if self.peek_at(Kind::LCurly) {
                 self.bump(Kind::Static);
-                return self.parse_class_static_block(span);
+                return self.parse_class_static_block(span).map(Some);
             }
 
             // static ...
@@ -200,7 +217,9 @@ impl<'a> Parser<'a> {
 
         // async ...
         if key_name.is_none() && self.at(Kind::Async) && !self.peek_at(Kind::Question) {
-            if self.peek_kind().is_class_element_name_start() || self.peek_at(Kind::Star) {
+            if !self.peek_token().is_on_new_line
+                && (self.peek_kind().is_class_element_name_start() || self.peek_at(Kind::Star))
+            {
                 self.bump(Kind::Async);
                 r#async = true;
             } else {
@@ -209,9 +228,9 @@ impl<'a> Parser<'a> {
         }
 
         if self.is_at_ts_index_signature_member() {
-            if let TSSignature::TSIndexSignature(sig) = self.parse_ts_index_signature_member()? {
-                return Ok(ClassElement::TSIndexSignature(sig));
-            }
+            return self
+                .parse_index_signature_declaration(span, &modifiers)
+                .map(|sig| Some(ClassElement::TSIndexSignature(self.alloc(sig))));
         }
 
         // * ...
@@ -243,24 +262,72 @@ impl<'a> Parser<'a> {
         let (key, computed) =
             if let Some(result) = key_name { result } else { self.parse_class_element_name()? };
 
-        let optional = self.eat(Kind::Question);
+        let (optional, optional_span) = if self.at(Kind::Question) {
+            let span = self.start_span();
+            self.bump_any();
+            (true, self.end_span(span))
+        } else {
+            (false, oxc_span::SPAN)
+        };
         let definite = self.eat(Kind::Bang);
 
+        if optional && definite {
+            self.error(diagnostics::optional_definite_property(optional_span.expand_right(1)));
+        }
+
+        if modifiers.contains(ModifierKind::Const) {
+            self.error(diagnostics::const_class_member(key.span()));
+        }
+
         if let PropertyKey::PrivateIdentifier(private_ident) = &key {
+            // `private #foo`, etc. is illegal
+            if self.is_ts {
+                self.verify_modifiers(
+                    &modifiers,
+                    ModifierFlags::all() - ModifierFlags::ACCESSIBILITY,
+                    diagnostics::accessibility_modifier_on_private_property,
+                );
+            }
             if private_ident.name == "constructor" {
-                self.error(diagnostics::PrivateNameConstructor(private_ident.span));
+                self.error(diagnostics::private_name_constructor(private_ident.span));
             }
         }
 
         if accessor {
-            self.parse_ts_type_annotation()?;
-
-            return self.parse_class_accessor_property(span, key, computed, r#static);
-        }
-
-        // LAngle for start of type parameters `foo<T>`
-        //                                         ^
-        if self.at(Kind::LParen) || self.at(Kind::LAngle) || r#async || generator {
+            if optional {
+                self.error(diagnostics::optional_accessor_property(optional_span));
+            }
+            self.parse_class_accessor_property(
+                span,
+                key,
+                computed,
+                r#static,
+                r#abstract,
+                definite,
+                accessibility,
+            )
+            .map(Some)
+        } else if self.at(Kind::LParen) || self.at(Kind::LAngle) || r#async || generator {
+            if !computed {
+                if let Some((name, span)) = key.prop_name() {
+                    if r#static && name == "prototype" && !self.ctx.has_ambient() {
+                        self.error(diagnostics::static_prototype(span));
+                    }
+                    if !r#static && name == "constructor" {
+                        if kind == MethodDefinitionKind::Get || kind == MethodDefinitionKind::Set {
+                            self.error(diagnostics::constructor_getter_setter(span));
+                        }
+                        if r#async {
+                            self.error(diagnostics::constructor_async(span));
+                        }
+                        if generator {
+                            self.error(diagnostics::constructor_generator(span));
+                        }
+                    }
+                }
+            }
+            // LAngle for start of type parameters `foo<T>`
+            //                                         ^
             let definition = self.parse_class_method_definition(
                 span,
                 kind,
@@ -274,24 +341,22 @@ impl<'a> Parser<'a> {
                 accessibility,
                 optional,
             )?;
-            if let Some((name, span)) = definition.prop_name() {
-                if r#static && name == "prototype" && !self.ctx.has_ambient() {
-                    self.error(diagnostics::StaticPrototype(span));
-                }
-                if !r#static && name == "constructor" {
-                    if kind == MethodDefinitionKind::Get || kind == MethodDefinitionKind::Set {
-                        self.error(diagnostics::ConstructorGetterSetter(span));
+            Ok(Some(definition))
+        } else {
+            // getter and setter has no ts type annotation
+            if !kind.is_method() {
+                return Err(self.unexpected());
+            }
+            if !computed {
+                if let Some((name, span)) = key.prop_name() {
+                    if name == "constructor" {
+                        self.error(diagnostics::field_constructor(span));
                     }
-                    if r#async {
-                        self.error(diagnostics::ConstructorAsync(span));
-                    }
-                    if generator {
-                        self.error(diagnostics::ConstructorGenerator(span));
+                    if r#static && name == "prototype" && !self.ctx.has_ambient() {
+                        self.error(diagnostics::static_prototype(span));
                     }
                 }
             }
-            Ok(definition)
-        } else {
             let definition = self.parse_class_property_definition(
                 span,
                 key,
@@ -305,15 +370,7 @@ impl<'a> Parser<'a> {
                 optional,
                 definite,
             )?;
-            if let Some((name, span)) = definition.prop_name() {
-                if name == "constructor" {
-                    self.error(diagnostics::FieldConstructor(span));
-                }
-                if r#static && name == "prototype" && !self.ctx.has_ambient() {
-                    self.error(diagnostics::StaticPrototype(span));
-                }
-            }
-            Ok(definition)
+            Ok(Some(definition))
         }
     }
 
@@ -321,13 +378,13 @@ impl<'a> Parser<'a> {
         match self.cur_kind() {
             Kind::PrivateIdentifier => {
                 let private_ident = self.parse_private_identifier();
-                Ok((PropertyKey::PrivateIdentifier(self.ast.alloc(private_ident)), false))
+                Ok((PropertyKey::PrivateIdentifier(self.alloc(private_ident)), false))
             }
             _ => self.parse_property_name(),
         }
     }
 
-    #[allow(clippy::too_many_arguments, clippy::fn_params_excessive_bools)]
+    #[expect(clippy::too_many_arguments, clippy::fn_params_excessive_bools)]
     fn parse_class_method_definition(
         &mut self,
         span: Span,
@@ -344,53 +401,55 @@ impl<'a> Parser<'a> {
     ) -> Result<ClassElement<'a>> {
         let kind = if !r#static
             && !computed
-            && key.prop_name().map_or(false, |(name, _)| name == "constructor")
+            && key.prop_name().is_some_and(|(name, _)| name == "constructor")
         {
             MethodDefinitionKind::Constructor
         } else {
             kind
         };
 
-        let decorators = self.state.consume_decorators();
+        let decorators = self.consume_decorators();
 
         let value = self.parse_method(r#async, generator)?;
 
-        if kind == MethodDefinitionKind::Get
-            && value.params.parameters_count() != value.params.this_parameter().map_or(0, |_| 1)
-        {
-            self.error(diagnostics::GetterParameters(value.params.span));
+        if kind == MethodDefinitionKind::Constructor {
+            if let Some(this_param) = &value.this_param {
+                // class Foo { constructor(this: number) {} }
+                self.error(diagnostics::ts_constructor_this_parameter(this_param.span));
+            }
+
+            if let Some(type_sig) = &value.type_parameters {
+                // class Foo { constructor<T>(param: T ) {} }
+                self.error(diagnostics::ts_constructor_type_parameter(type_sig.span));
+            }
+
+            if r#static {
+                self.error(diagnostics::static_constructor(key.span()));
+            }
         }
 
-        if kind == MethodDefinitionKind::Set
-            && value.params.parameters_count() != value.params.this_parameter().map_or(1, |_| 2)
-        {
-            self.error(diagnostics::SetterParameters(value.params.span));
-        }
-
-        let method_definition = MethodDefinition {
-            span: self.end_span(span),
+        let r#type = if r#abstract {
+            MethodDefinitionType::TSAbstractMethodDefinition
+        } else {
+            MethodDefinitionType::MethodDefinition
+        };
+        Ok(self.ast.class_element_method_definition(
+            self.end_span(span),
+            r#type,
+            decorators,
             key,
             value,
             kind,
             computed,
             r#static,
             r#override,
-            accessibility,
             optional,
-            decorators,
-        };
-
-        if r#abstract {
-            Ok(ClassElement::TSAbstractMethodDefinition(
-                self.ast.alloc(TSAbstractMethodDefinition { method_definition }),
-            ))
-        } else {
-            Ok(ClassElement::MethodDefinition(self.ast.alloc(method_definition)))
-        }
+            accessibility,
+        ))
     }
 
     /// `FieldDefinition`[?Yield, ?Await] ;
-    #[allow(clippy::too_many_arguments, clippy::fn_params_excessive_bools)]
+    #[expect(clippy::too_many_arguments, clippy::fn_params_excessive_bools)]
     fn parse_class_property_definition(
         &mut self,
         span: Span,
@@ -405,66 +464,75 @@ impl<'a> Parser<'a> {
         optional: bool,
         definite: bool,
     ) -> Result<ClassElement<'a>> {
-        let type_annotation =
-            if self.ts_enabled() { self.parse_ts_type_annotation()? } else { None };
-        let value = if self.eat(Kind::Eq) {
-            // let current_flags = self.scope.current_flags();
-            // self.scope.set_current_flags(self.scope.current_flags());
-            let expr = self.parse_expression()?;
-            // self.scope.set_current_flags(current_flags);
-            Some(expr)
-        } else {
-            None
-        };
+        let type_annotation = if self.is_ts { self.parse_ts_type_annotation()? } else { None };
+        let decorators = self.consume_decorators();
+        let value = if self.eat(Kind::Eq) { Some(self.parse_expr()?) } else { None };
         self.asi()?;
 
-        let property_definition = PropertyDefinition {
-            span: self.end_span(span),
+        let r#type = if r#abstract {
+            PropertyDefinitionType::TSAbstractPropertyDefinition
+        } else {
+            PropertyDefinitionType::PropertyDefinition
+        };
+        Ok(self.ast.class_element_property_definition(
+            self.end_span(span),
+            r#type,
+            decorators,
             key,
             value,
             computed,
             r#static,
             declare,
             r#override,
+            optional,
+            definite,
             readonly,
             type_annotation,
             accessibility,
-            optional,
-            definite,
-            decorators: self.state.consume_decorators(),
-        };
-
-        if r#abstract {
-            Ok(ClassElement::TSAbstractPropertyDefinition(
-                self.ast.alloc(TSAbstractPropertyDefinition { property_definition }),
-            ))
-        } else {
-            Ok(ClassElement::PropertyDefinition(self.ast.alloc(property_definition)))
-        }
+        ))
     }
 
     /// `ClassStaticBlockStatementList` :
     ///    `StatementList`[~Yield, +Await, ~Return]
     fn parse_class_static_block(&mut self, span: Span) -> Result<ClassElement<'a>> {
-        let has_await = self.ctx.has_await();
-        let has_yield = self.ctx.has_yield();
-        let has_return = self.ctx.has_return();
-        self.ctx = self.ctx.and_await(true).and_yield(false).and_return(false);
-        let block = self.parse_block()?;
-        self.ctx = self.ctx.and_await(has_await).and_yield(has_yield).and_return(has_return);
-        Ok(self.ast.static_block(self.end_span(span), block.unbox().body))
+        let block =
+            self.context(Context::Await, Context::Yield | Context::Return, Self::parse_block)?;
+        Ok(self.ast.class_element_static_block(self.end_span(span), block.unbox().body))
     }
 
     /// <https://github.com/tc39/proposal-decorators>
+    #[expect(clippy::too_many_arguments, clippy::fn_params_excessive_bools)]
     fn parse_class_accessor_property(
         &mut self,
         span: Span,
         key: PropertyKey<'a>,
         computed: bool,
         r#static: bool,
+        r#abstract: bool,
+        definite: bool,
+        accessibility: Option<TSAccessibility>,
     ) -> Result<ClassElement<'a>> {
+        let type_annotation = if self.is_ts { self.parse_ts_type_annotation()? } else { None };
         let value =
-            self.eat(Kind::Eq).then(|| self.parse_assignment_expression_base()).transpose()?;
-        Ok(self.ast.accessor_property(self.end_span(span), key, value, computed, r#static))
+            self.eat(Kind::Eq).then(|| self.parse_assignment_expression_or_higher()).transpose()?;
+        let r#type = if r#abstract {
+            AccessorPropertyType::TSAbstractAccessorProperty
+        } else {
+            AccessorPropertyType::AccessorProperty
+        };
+
+        let decorators = self.consume_decorators();
+        Ok(self.ast.class_element_accessor_property(
+            self.end_span(span),
+            r#type,
+            decorators,
+            key,
+            value,
+            computed,
+            r#static,
+            definite,
+            type_annotation,
+            accessibility,
+        ))
     }
 }

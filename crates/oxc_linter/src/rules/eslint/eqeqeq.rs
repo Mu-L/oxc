@@ -1,21 +1,19 @@
 use oxc_ast::{
-    ast::{BinaryExpression, Expression},
     AstKind,
+    ast::{BinaryExpression, Expression},
 };
-use oxc_diagnostics::{
-    miette::{self, Diagnostic},
-    thiserror::{self, Error},
-};
+use oxc_diagnostics::OxcDiagnostic;
 use oxc_macros::declare_oxc_lint;
 use oxc_span::{GetSpan, Span};
 use oxc_syntax::operator::{BinaryOperator, UnaryOperator};
 
-use crate::{context::LintContext, fixer::Fix, rule::Rule, AstNode};
+use crate::{AstNode, context::LintContext, rule::Rule};
 
-#[derive(Debug, Error, Diagnostic)]
-#[error("eslint(eqeqeq): Expected {1} and instead saw {0}")]
-#[diagnostic(severity(warning), help("Prefer {1} operator"))]
-struct EqeqeqDiagnostic(&'static str, &'static str, #[label] pub Span);
+fn eqeqeq_diagnostic(x0: &str, x1: &str, span2: Span) -> OxcDiagnostic {
+    OxcDiagnostic::warn(format!("Expected {x1} and instead saw {x0}"))
+        .with_help(format!("Prefer {x1} operator"))
+        .with_label(span2)
+}
 
 #[derive(Debug, Default, Clone)]
 pub struct Eqeqeq {
@@ -37,29 +35,31 @@ declare_oxc_lint!(
     /// a == b
     /// ```
     Eqeqeq,
-    pedantic
+    eslint,
+    pedantic,
+    conditional_fix
 );
 
 impl Rule for Eqeqeq {
     fn from_configuration(value: serde_json::Value) -> Self {
-        let obj1 = value.get(0);
-        let obj2 = value.get(1);
+        let first_arg = value.get(0).and_then(serde_json::Value::as_str);
 
-        Self {
-            compare_type: obj1
-                .and_then(serde_json::Value::as_str)
-                .map(CompareType::from)
-                .unwrap_or_default(),
-            null_type: obj2
-                .and_then(|v| v.get("null"))
-                .and_then(serde_json::Value::as_str)
-                .map(NullType::from)
-                .unwrap_or_default(),
-        }
+        let null_type = value
+            .get(usize::from(first_arg.is_some()))
+            .and_then(|v| v.get("null"))
+            .and_then(serde_json::Value::as_str)
+            .map(NullType::from)
+            .unwrap_or_default();
+
+        let compare_type = first_arg.map(CompareType::from).unwrap_or_default();
+
+        Self { compare_type, null_type }
     }
 
     fn run<'a>(&self, node: &AstNode<'a>, ctx: &LintContext<'a>) {
-        let AstKind::BinaryExpression(binary_expr) = node.kind() else { return };
+        let AstKind::BinaryExpression(binary_expr) = node.kind() else {
+            return;
+        };
         let is_null = is_null_check(binary_expr);
         let enforce_rule_for_null = matches!(self.null_type, NullType::Always);
         let enforce_inverse_rule_for_null = matches!(self.null_type, NullType::Never);
@@ -70,7 +70,7 @@ impl Rule for Eqeqeq {
                 // There are some uncontrolled cases to auto fix.
                 // In ESlint, `null >= null` will be auto fixed to `null > null` which is also wrong.
                 // So I just report it.
-                ctx.diagnostic(EqeqeqDiagnostic(
+                ctx.diagnostic(eqeqeq_diagnostic(
                     operator,
                     &operator[0..operator.len() - 1],
                     binary_expr.span,
@@ -101,18 +101,33 @@ impl Rule for Eqeqeq {
         let (preferred_operator, preferred_operator_with_padding) =
             to_strict_eq_operator_str(binary_expr.operator);
 
+        #[expect(clippy::cast_possible_truncation)]
+        let operator_span = {
+            let left_end = binary_expr.left.span().end;
+            let right_start = binary_expr.right.span().start;
+            let offset = Span::new(left_end, right_start)
+                .source_text(ctx.source_text())
+                .find(operator)
+                .unwrap_or(0) as u32;
+
+            let operator_start = left_end + offset;
+            let operator_end = operator_start + operator.len() as u32;
+            Span::new(operator_start, operator_end)
+        };
+
         // If the comparison is a `typeof` comparison or both sides are literals with the same type, then it's safe to fix.
         if is_type_of_binary_bool || are_literals_and_same_type_bool {
             ctx.diagnostic_with_fix(
-                EqeqeqDiagnostic(operator, preferred_operator, binary_expr.span),
-                || {
+                eqeqeq_diagnostic(operator, preferred_operator, operator_span),
+                |fixer| {
                     let start = binary_expr.left.span().end;
                     let end = binary_expr.right.span().start;
-                    Fix::new(preferred_operator_with_padding, Span { start, end })
+                    let span = Span::new(start, end);
+                    fixer.replace(span, preferred_operator_with_padding)
                 },
             );
         } else {
-            ctx.diagnostic(EqeqeqDiagnostic(operator, preferred_operator, binary_expr.span));
+            ctx.diagnostic(eqeqeq_diagnostic(operator, preferred_operator, operator_span));
         }
     }
 }
@@ -177,8 +192,8 @@ fn are_literals_and_same_type(left: &Expression, right: &Expression) -> bool {
         (Expression::BooleanLiteral(_), Expression::BooleanLiteral(_))
             | (Expression::NullLiteral(_), Expression::NullLiteral(_))
             | (Expression::StringLiteral(_), Expression::StringLiteral(_))
-            | (Expression::NumberLiteral(_), Expression::NumberLiteral(_))
-            | (Expression::BigintLiteral(_), Expression::BigintLiteral(_))
+            | (Expression::NumericLiteral(_), Expression::NumericLiteral(_))
+            | (Expression::BigIntLiteral(_), Expression::BigIntLiteral(_))
             | (Expression::RegExpLiteral(_), Expression::RegExpLiteral(_))
             | (Expression::TemplateLiteral(_), Expression::TemplateLiteral(_))
     )
@@ -210,6 +225,8 @@ fn test() {
         ("null == null", Some(json!(["always", {"null": "never"}]))),
         // Do not apply this rule to `null`.
         ("null == null", Some(json!(["smart", {"null": "ignore"}]))),
+        // Issue: <https://github.com/oxc-project/oxc/issues/8773>
+        ("href != null", Some(json!([{"null": "ignore"}]))),
     ];
 
     let fail = vec![
@@ -237,5 +254,5 @@ fn test() {
         ("a == b", "a == b", None),
     ];
 
-    Tester::new(Eqeqeq::NAME, pass, fail).expect_fix(fix).test_and_snapshot();
+    Tester::new(Eqeqeq::NAME, Eqeqeq::PLUGIN, pass, fail).expect_fix(fix).test_and_snapshot();
 }

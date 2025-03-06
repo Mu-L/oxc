@@ -1,0 +1,13 @@
+packages:
+  - 'napi/*'
+  - 'wasm/*'
+  - 'npm/*'
+  - 'editors/*'
+  - 'tasks/transform_conformance'
+  - 'tasks/compat_data'
+  - 'tasks/e2e'
+
+catalog:
+  "@napi-rs/cli": 3.0.0-alpha.72
+  "vitest": 3.0.7
+  "typescript": 5.8.2

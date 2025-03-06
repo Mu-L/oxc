@@ -1,35 +1,33 @@
 [package]
-name                  = "oxc_transform_conformance"
-version               = "0.0.0"
-publish               = false
-authors.workspace     = true
+name = "oxc_transform_conformance"
+version = "0.0.0"
+authors.workspace = true
+edition.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+license.workspace = true
+publish = false
+repository.workspace = true
 description.workspace = true
-edition.workspace     = true
-homepage.workspace    = true
-keywords.workspace    = true
-license.workspace     = true
-repository.workspace  = true
+
+[lints]
+workspace = true
 
 [lib]
 doctest = false
 
+[[bin]]
+name = "oxc_transform_conformance"
+test = false
+doctest = false
+
 [dependencies]
-oxc_span         = { workspace = true }
-oxc_allocator    = { workspace = true }
-oxc_parser       = { workspace = true }
-oxc_semantic     = { workspace = true }
-oxc_codegen      = { workspace = true }
-oxc_transformer  = { workspace = true }
+oxc = { workspace = true, features = ["full"] }
 oxc_tasks_common = { workspace = true }
+oxc_tasks_transform_checker = { workspace = true }
 
-serde_json = { workspace = true }
-serde      = { workspace = true }
-walkdir    = { workspace = true }
-pico-args  = { workspace = true }
-indexmap   = { workspace = true }
-
-[target.'cfg(not(target_env = "msvc"))'.dependencies]
-jemallocator = { workspace = true }
-
-[target.'cfg(target_os = "windows")'.dependencies]
-mimalloc = { workspace = true }
+cow-utils = { workspace = true }
+indexmap = { workspace = true }
+pico-args = { workspace = true }
+similar = { workspace = true }
+walkdir = { workspace = true }

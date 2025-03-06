@@ -1,27 +1,26 @@
+#![expect(clippy::print_stdout, clippy::print_stderr, clippy::disallowed_methods)]
 use std::{
     borrow::Cow,
-    fmt,
-    fmt::{Display, Formatter},
+    fmt::{self, Display, Formatter},
 };
 
 use convert_case::{Case, Casing};
 use oxc_allocator::Allocator;
-use oxc_ast::{
-    ast::{
-        Argument, ArrayExpressionElement, CallExpression, Expression, ExpressionStatement,
-        MemberExpression, ObjectExpression, ObjectProperty, ObjectPropertyKind, Program,
-        PropertyKey, Statement, StaticMemberExpression, StringLiteral, TaggedTemplateExpression,
-        TemplateLiteral,
-    },
-    Visit,
+use oxc_ast::ast::{
+    Argument, ArrayExpressionElement, CallExpression, ExportDefaultDeclarationKind, Expression,
+    ExpressionStatement, ObjectExpression, ObjectProperty, ObjectPropertyKind, Program,
+    PropertyKey, Statement, StaticMemberExpression, StringLiteral, TaggedTemplateExpression,
+    TemplateLiteral,
 };
+use oxc_ast_visit::Visit;
 use oxc_parser::Parser;
-use oxc_span::{GetSpan, SourceType};
+use oxc_span::{GetSpan, SourceType, Span};
+use rustc_hash::FxHashMap;
 use serde::Serialize;
-use ureq::Response;
 
 mod json;
 mod template;
+mod util;
 
 const ESLINT_TEST_PATH: &str =
     "https://raw.githubusercontent.com/eslint/eslint/main/tests/lib/rules";
@@ -29,11 +28,13 @@ const ESLINT_TEST_PATH: &str =
 const JEST_TEST_PATH: &str =
     "https://raw.githubusercontent.com/jest-community/eslint-plugin-jest/main/src/rules/__tests__";
 
-const TYPESCRIPT_ESLINT_TEST_PATH: &str =
-    "https://raw.githubusercontent.com/typescript-eslint/typescript-eslint/main/packages/eslint-plugin/tests/rules";
+const TYPESCRIPT_ESLINT_TEST_PATH: &str = "https://raw.githubusercontent.com/typescript-eslint/typescript-eslint/main/packages/eslint-plugin/tests/rules";
 
 const UNICORN_TEST_PATH: &str =
     "https://raw.githubusercontent.com/sindresorhus/eslint-plugin-unicorn/main/test";
+
+const IMPORT_TEST_PATH: &str =
+    "https://raw.githubusercontent.com/import-js/eslint-plugin-import/main/tests/src/rules";
 
 const REACT_TEST_PATH: &str =
     "https://raw.githubusercontent.com/jsx-eslint/eslint-plugin-react/master/tests/lib/rules";
@@ -41,49 +42,146 @@ const REACT_TEST_PATH: &str =
 const JSX_A11Y_TEST_PATH: &str =
     "https://raw.githubusercontent.com/jsx-eslint/eslint-plugin-jsx-a11y/main/__tests__/src/rules";
 
-struct TestCase<'a> {
+const NEXT_JS_TEST_PATH: &str =
+    "https://raw.githubusercontent.com/vercel/next.js/canary/test/unit/eslint-plugin-next";
+
+const JSDOC_TEST_PATH: &str =
+    "https://raw.githubusercontent.com/gajus/eslint-plugin-jsdoc/main/test/rules/assertions";
+
+const REACT_PERF_TEST_PATH: &str =
+    "https://raw.githubusercontent.com/cvazac/eslint-plugin-react-perf/master/tests/lib/rules";
+
+const NODE_TEST_PATH: &str =
+    "https://raw.githubusercontent.com/eslint-community/eslint-plugin-n/master/tests/lib/rules";
+
+const PROMISE_TEST_PATH: &str =
+    "https://raw.githubusercontent.com/eslint-community/eslint-plugin-promise/main/__tests__";
+
+const VITEST_TEST_PATH: &str =
+    "https://raw.githubusercontent.com/veritem/eslint-plugin-vitest/main/tests";
+
+struct TestCase {
     source_text: String,
     code: Option<String>,
-    config: Option<Cow<'a, str>>,
+    output: Option<String>,
+    group_comment: Option<String>,
+    config: Option<String>,
+    settings: Option<String>,
+    filename: Option<String>,
+    language_options: Option<String>,
 }
 
-impl<'a> TestCase<'a> {
-    fn new(source_text: &str, arg: &'a Expression<'a>) -> Self {
-        let mut test_case = Self { source_text: source_text.to_string(), code: None, config: None };
+impl TestCase {
+    fn new(source_text: &str, arg: &Expression<'_>) -> Self {
+        let mut test_case = Self {
+            source_text: source_text.to_string(),
+            code: None,
+            output: None,
+            config: None,
+            settings: None,
+            group_comment: None,
+            filename: None,
+            language_options: None,
+        };
         test_case.visit_expression(arg);
         test_case
     }
 
-    fn code(&self, need_config: bool) -> String {
+    fn with_group_comment(mut self, comment: String) -> Self {
+        self.group_comment = Some(comment);
+        self
+    }
+
+    fn code(&self, need_config: bool, need_settings: bool, need_filename: bool) -> String {
         self.code
             .as_ref()
             .map(|code| {
-                let mut code = if code.contains('\n') {
-                    code.replace('\n', "\n\t\t\t").replace('\\', "\\\\").replace('\"', "\\\"")
-                } else {
-                    code.to_string()
-                };
-
-                if code.contains('"') {
-                    // handle " to \" and then \\" to \"
-                    code = code.replace('"', "\\\"").replace("\\\\\"", "\\\"");
-                }
-
+                let code_str = format_code_snippet(code);
                 let config = self.config.as_ref().map_or_else(
                     || "None".to_string(),
                     |config| format!("Some(serde_json::json!({config}))"),
                 );
-                if need_config {
-                    format!("(r#\"{code}\"#, {config})")
+                let settings = self.settings.as_ref().map_or_else(
+                    || "None".to_string(),
+                    |settings| format!(r#"Some(serde_json::json!({{ "settings": {settings} }}))"#),
+                );
+                let filename = self.filename.as_ref().map_or_else(
+                    || "None".to_string(),
+                    |filename| format!(r#"Some(PathBuf::from("{filename}"))"#),
+                );
+                let code_str = if need_filename {
+                    format!("({code_str}, {config}, {settings}, {filename})")
+                } else if need_settings {
+                    format!("({code_str}, {config}, {settings})")
+                } else if need_config {
+                    format!("({code_str}, {config})")
                 } else {
-                    format!("r#\"{code}\"#")
+                    code_str
+                };
+                if let Some(language_options) = &self.language_options {
+                    format!("{code_str}, // {language_options}")
+                } else {
+                    code_str
                 }
             })
             .unwrap_or_default()
     }
+
+    fn group_comment(&self) -> Option<&str> {
+        self.group_comment.as_deref()
+    }
+
+    fn output(&self) -> Option<String> {
+        let code = format_code_snippet(self.code.as_ref()?);
+        let output = format_code_snippet(self.output.as_ref()?);
+        let config = self.config.as_ref().map_or_else(
+            || "None".to_string(),
+            |config| format!("Some(serde_json::json!({config}))"),
+        );
+
+        // ("null==null", "null === null", None),
+        Some(format!(r"({code}, {output}, {config})"))
+    }
 }
 
-impl<'a> Visit<'a> for TestCase<'a> {
+fn format_code_snippet(code: &str) -> String {
+    let code = if code.contains('\n') {
+        code.replace('\n', "\n\t\t\t").replace('\\', "\\\\").replace('\"', "\\\"")
+    } else {
+        code.to_string()
+    };
+
+    // Do not quote strings that are already raw strings
+    if code.starts_with("r\"") || code.starts_with("r#\"") {
+        return code;
+    }
+
+    // "debugger" => "debugger"
+    if !code.contains('"') {
+        return format!("\"{code}\"");
+    }
+
+    // "document.querySelector("#foo");" => r##"document.querySelector("#foo");"##
+    if code.contains("\"#") {
+        return format!("r##\"{code}\"##");
+    }
+
+    // 'import foo from "foo";' => r#"import foo from "foo";"#
+    format!("r#\"{}\"#", code.replace("\\\"", "\""))
+}
+
+// TODO: handle `noFormat`(in typescript-eslint)
+fn format_tagged_template_expression(tag_expr: &TaggedTemplateExpression) -> Option<String> {
+    if tag_expr.tag.is_specific_member_access("String", "raw") {
+        tag_expr.quasi.quasis.first().map(|quasi| format!("r#\"{}\"#", quasi.value.raw))
+    } else if tag_expr.tag.is_specific_id("dedent") || tag_expr.tag.is_specific_id("outdent") {
+        tag_expr.quasi.quasis.first().map(|quasi| util::dedent(&quasi.value.raw))
+    } else {
+        tag_expr.quasi.quasi().map(|quasi| quasi.to_string())
+    }
+}
+
+impl<'a> Visit<'a> for TestCase {
     fn visit_expression(&mut self, expr: &Expression<'a>) {
         match expr {
             Expression::StringLiteral(lit) => self.visit_string_literal(lit),
@@ -98,13 +196,12 @@ impl<'a> Visit<'a> for TestCase<'a> {
     }
 
     fn visit_call_expression(&mut self, expr: &CallExpression<'a>) {
-        if let Expression::MemberExpression(member_expr) = &expr.callee {
+        if let Some(member_expr) = expr.callee.as_member_expression() {
             if let Expression::ArrayExpression(array_expr) = member_expr.object() {
                 // ['class A {', '}'].join('\n')
                 let mut code = String::new();
                 for arg in &array_expr.elements {
-                    let ArrayExpressionElement::Expression(Expression::StringLiteral(lit)) = arg
-                    else {
+                    let ArrayExpressionElement::StringLiteral(lit) = arg else {
                         continue;
                     };
                     code.push_str(lit.value.as_str());
@@ -120,33 +217,21 @@ impl<'a> Visit<'a> for TestCase<'a> {
         for obj_prop in &expr.properties {
             match obj_prop {
                 ObjectPropertyKind::ObjectProperty(prop) => match &prop.key {
-                    PropertyKey::Identifier(ident) if ident.name == "code" => {
+                    PropertyKey::StaticIdentifier(ident) if ident.name == "code" => {
                         self.code = match &prop.value {
                             Expression::StringLiteral(s) => Some(s.value.to_string()),
-                            // eslint-plugin-jest use dedent to strips indentation from multi-line strings
                             Expression::TaggedTemplateExpression(tag_expr) => {
-                                let Expression::Identifier(ident) = &tag_expr.tag else {
-                                    continue;
-                                };
-                                if ident.name != "dedent" {
-                                    continue;
-                                }
-                                tag_expr.quasi.quasi().map(ToString::to_string)
+                                format_tagged_template_expression(tag_expr)
                             }
                             Expression::TemplateLiteral(tag_expr) => {
-                                tag_expr.quasi().map(ToString::to_string)
+                                tag_expr.quasi().map(|quasi| quasi.to_string())
                             }
                             // handle code like ["{", "a: 1", "}"].join("\n")
                             Expression::CallExpression(call_expr) => {
-                                if !call_expr.arguments.first().is_some_and(|arg|  matches!(arg, Argument::Expression(Expression::StringLiteral(string)) if string.value == "\n")) {
+                                if !call_expr.arguments.first().is_some_and(|arg|  matches!(arg, Argument::StringLiteral(string) if string.value == "\n")) {
                                     continue;
                                 }
-                                let Expression::MemberExpression(member_expr) = &call_expr.callee
-                                else {
-                                    continue;
-                                };
-                                let MemberExpression::StaticMemberExpression(member) =
-                                    &member_expr.0
+                                let Expression::StaticMemberExpression(member) = &call_expr.callee
                                 else {
                                     continue;
                                 };
@@ -161,9 +246,9 @@ impl<'a> Visit<'a> for TestCase<'a> {
                                         .elements
                                         .iter()
                                         .map(|arg| match arg {
-                                            ArrayExpressionElement::Expression(
-                                                Expression::StringLiteral(string),
-                                            ) => string.value.as_str(),
+                                            ArrayExpressionElement::StringLiteral(string) => {
+                                                string.value.as_str()
+                                            }
                                             _ => "",
                                         })
                                         .collect::<Vec<_>>()
@@ -173,10 +258,39 @@ impl<'a> Visit<'a> for TestCase<'a> {
                             _ => continue,
                         }
                     }
-                    PropertyKey::Identifier(ident) if ident.name == "options" => {
+                    PropertyKey::StaticIdentifier(ident) if ident.name == "output" => {
+                        self.output = match &prop.value {
+                            Expression::StringLiteral(s) => Some(s.value.to_string()),
+                            Expression::TaggedTemplateExpression(tag_expr) => {
+                                format_tagged_template_expression(tag_expr)
+                            }
+                            Expression::TemplateLiteral(tag_expr) => {
+                                tag_expr.quasi().map(|quasi| quasi.to_string())
+                            }
+                            _ => None,
+                        }
+                    }
+                    PropertyKey::StaticIdentifier(ident) if ident.name == "options" => {
                         let span = prop.value.span();
                         let option_text = &self.source_text[span.start as usize..span.end as usize];
-                        self.config = Some(Cow::Owned(json::wrap_property_in_quotes(option_text)));
+                        self.config = Some(json::convert_config_to_json_literal(option_text));
+                    }
+                    PropertyKey::StaticIdentifier(ident) if ident.name == "settings" => {
+                        let span = prop.value.span();
+                        let setting_text = span.source_text(&self.source_text);
+                        self.settings = Some(json::convert_config_to_json_literal(setting_text));
+                    }
+                    PropertyKey::StaticIdentifier(ident) if ident.name == "filename" => {
+                        let span = prop.value.span();
+                        let filename = span.source_text(&self.source_text);
+                        self.filename = Some(filename.to_string());
+                    }
+                    PropertyKey::StaticIdentifier(ident) if ident.name == "languageOptions" => {
+                        let span = prop.value.span();
+                        let language_options = span.source_text(&self.source_text);
+                        let language_options =
+                            json::convert_config_to_json_literal(language_options);
+                        self.language_options = Some(language_options);
                     }
                     _ => continue,
                 },
@@ -196,48 +310,60 @@ impl<'a> Visit<'a> for TestCase<'a> {
     }
 
     fn visit_tagged_template_expression(&mut self, expr: &TaggedTemplateExpression<'a>) {
-        let Expression::Identifier(ident) = &expr.tag else {
-            return;
-        };
-        if ident.name != "dedent" {
-            return;
-        }
-        self.code = expr.quasi.quasi().map(std::string::ToString::to_string);
+        self.code = format_tagged_template_expression(expr);
         self.config = None;
     }
 }
 
 #[derive(Serialize)]
 pub struct Context {
-    plugin_name: String,
+    mod_name: String,
     kebab_rule_name: String,
     pascal_rule_name: String,
     snake_rule_name: String,
     pass_cases: String,
     fail_cases: String,
-    test_method: String,
+    fix_cases: Option<String>,
+    has_filename: bool,
+    /// Language examples are written in.
+    ///
+    /// Should be `"js"`, `"jsx"`, `"ts"`, `"tsx"`. Defaults to `"js"`.
+    language: Cow<'static, str>,
 }
 
 impl Context {
-    fn new(
-        plugin_name: String,
-        rule_name: &str,
-        pass_cases: String,
-        fail_cases: String,
-        test_method: String,
-    ) -> Self {
+    fn new(plugin_name: RuleKind, rule_name: &str, pass_cases: String, fail_cases: String) -> Self {
         let pascal_rule_name = rule_name.to_case(Case::Pascal);
         let kebab_rule_name = rule_name.to_case(Case::Kebab);
         let underscore_rule_name = rule_name.to_case(Case::Snake);
+        let mod_name = get_mod_name(plugin_name);
+
         Self {
-            plugin_name,
+            mod_name,
             kebab_rule_name,
             pascal_rule_name,
             snake_rule_name: underscore_rule_name,
             pass_cases,
             fail_cases,
-            test_method,
+            fix_cases: None,
+            has_filename: false,
+            language: Cow::Borrowed("js"),
         }
+    }
+
+    fn with_filename(mut self, has_filename: bool) -> Self {
+        self.has_filename = has_filename;
+        self
+    }
+
+    fn with_fix_cases(mut self, fix_cases: String) -> Self {
+        self.fix_cases = Some(fix_cases);
+        self
+    }
+
+    fn with_language<S: Into<Cow<'static, str>>>(mut self, language: S) -> Self {
+        self.language = language.into();
+        self
     }
 }
 
@@ -245,22 +371,55 @@ struct State<'a> {
     source_text: &'a str,
     valid_tests: Vec<&'a Expression<'a>>,
     invalid_tests: Vec<&'a Expression<'a>>,
+    expression_to_group_comment_map: FxHashMap<Span, String>,
+    group_comment_stack: Vec<String>,
 }
 
 impl<'a> State<'a> {
     fn new(source_text: &'a str) -> Self {
-        Self { source_text, valid_tests: vec![], invalid_tests: vec![] }
+        Self {
+            source_text,
+            valid_tests: vec![],
+            invalid_tests: vec![],
+            expression_to_group_comment_map: FxHashMap::default(),
+            group_comment_stack: vec![],
+        }
     }
 
     fn pass_cases(&self) -> Vec<TestCase> {
-        self.valid_tests.iter().map(|arg| TestCase::new(self.source_text, arg)).collect::<Vec<_>>()
+        self.get_test_cases(&self.valid_tests)
     }
 
     fn fail_cases(&self) -> Vec<TestCase> {
-        self.invalid_tests
+        self.get_test_cases(&self.invalid_tests)
+    }
+
+    fn get_test_cases(&self, tests: &[&'a Expression<'a>]) -> Vec<TestCase> {
+        tests
             .iter()
-            .map(|arg| TestCase::new(self.source_text, arg))
+            .map(|arg| {
+                let case = TestCase::new(self.source_text, arg);
+                if let Some(group_comment) = self.expression_to_group_comment_map.get(&arg.span()) {
+                    case.with_group_comment(group_comment.to_string())
+                } else {
+                    case
+                }
+            })
             .collect::<Vec<_>>()
+    }
+
+    fn get_comment(&self) -> String {
+        self.group_comment_stack.join(" ")
+    }
+
+    fn add_valid_test(&mut self, expr: &'a Expression<'a>) {
+        self.valid_tests.push(expr);
+        self.expression_to_group_comment_map.insert(expr.span(), self.get_comment());
+    }
+
+    fn add_invalid_test(&mut self, expr: &'a Expression<'a>) {
+        self.invalid_tests.push(expr);
+        self.expression_to_group_comment_map.insert(expr.span(), self.get_comment());
     }
 }
 
@@ -272,8 +431,17 @@ impl<'a> Visit<'a> for State<'a> {
     }
 
     fn visit_statement(&mut self, stmt: &Statement<'a>) {
-        if let Statement::ExpressionStatement(expr_stmt) = stmt {
-            self.visit_expression_statement(expr_stmt);
+        match stmt {
+            Statement::ExpressionStatement(expr_stmt) => self.visit_expression_statement(expr_stmt),
+            // for eslint-plugin-jsdoc
+            Statement::ExportDefaultDeclaration(export_decl) => {
+                if let ExportDefaultDeclarationKind::ObjectExpression(obj_expr) =
+                    &export_decl.declaration
+                {
+                    self.visit_object_expression(obj_expr);
+                }
+            }
+            _ => {}
         }
     }
 
@@ -281,32 +449,38 @@ impl<'a> Visit<'a> for State<'a> {
         self.visit_expression(&stmt.expression);
     }
 
-    fn visit_expression(&mut self, expr: &Expression<'a>) {
-        if let Expression::CallExpression(call_expr) = expr {
-            for arg in &call_expr.arguments {
-                self.visit_argument(arg);
+    fn visit_call_expression(&mut self, expr: &CallExpression<'a>) {
+        let mut pushed = false;
+        if let Expression::Identifier(ident) = &expr.callee {
+            // Add describe's first parameter as part group comment
+            // e.g. for `describe('valid', () => { ... })`, the group comment will be "valid"
+            if ident.name == "describe" {
+                if let Some(Argument::StringLiteral(lit)) = expr.arguments.first() {
+                    pushed = true;
+                    self.group_comment_stack.push(lit.value.to_string());
+                }
             }
         }
-    }
+        for arg in &expr.arguments {
+            self.visit_argument(arg);
+        }
 
-    fn visit_argument(&mut self, arg: &Argument<'a>) {
-        if let Argument::Expression(Expression::ObjectExpression(obj_expr)) = arg {
-            for obj_prop in &obj_expr.properties {
-                let ObjectPropertyKind::ObjectProperty(prop) = obj_prop else { return };
-                self.visit_object_property(prop);
-            }
+        if pushed {
+            self.group_comment_stack.pop();
         }
+
+        self.visit_expression(&expr.callee);
     }
 
     fn visit_object_property(&mut self, prop: &ObjectProperty<'a>) {
-        let PropertyKey::Identifier(ident) = &prop.key else { return };
+        let PropertyKey::StaticIdentifier(ident) = &prop.key else { return };
         match ident.name.as_str() {
             "valid" => {
                 if let Expression::ArrayExpression(array_expr) = &prop.value {
                     let array_expr = self.alloc(array_expr);
                     for arg in &array_expr.elements {
-                        if let ArrayExpressionElement::Expression(expr) = arg {
-                            self.valid_tests.push(expr);
+                        if let Some(expr) = arg.as_expression() {
+                            self.add_valid_test(expr);
                         }
                     }
                 }
@@ -315,22 +489,22 @@ impl<'a> Visit<'a> for State<'a> {
                 if let Some(args) = find_parser_arguments(&prop.value).map(|args| self.alloc(args))
                 {
                     for arg in args {
-                        if let Argument::Expression(expr) = arg {
-                            self.valid_tests.push(expr);
+                        if let Some(expr) = arg.as_expression() {
+                            self.add_valid_test(expr);
                         }
                     }
                 }
 
                 if let Expression::CallExpression(call_expr) = &prop.value {
-                    if let Expression::MemberExpression(_) = &call_expr.callee {
+                    if call_expr.callee.is_member_expression() {
                         // for eslint-plugin-react
-                        if let Some(Argument::Expression(Expression::ArrayExpression(array_expr))) =
+                        if let Some(Argument::ArrayExpression(array_expr)) =
                             call_expr.arguments.first()
                         {
                             let array_expr = self.alloc(array_expr);
                             for arg in &array_expr.elements {
-                                if let ArrayExpressionElement::Expression(expr) = arg {
-                                    self.valid_tests.push(expr);
+                                if let Some(expr) = arg.as_expression() {
+                                    self.add_valid_test(expr);
                                 }
                             }
                         }
@@ -341,8 +515,8 @@ impl<'a> Visit<'a> for State<'a> {
                 if let Expression::ArrayExpression(array_expr) = &prop.value {
                     let array_expr = self.alloc(array_expr);
                     for arg in &array_expr.elements {
-                        if let ArrayExpressionElement::Expression(expr) = arg {
-                            self.invalid_tests.push(expr);
+                        if let Some(expr) = arg.as_expression() {
+                            self.add_invalid_test(expr);
                         }
                     }
                 }
@@ -351,22 +525,22 @@ impl<'a> Visit<'a> for State<'a> {
                 if let Some(args) = find_parser_arguments(&prop.value).map(|args| self.alloc(args))
                 {
                     for arg in args {
-                        if let Argument::Expression(expr) = arg {
-                            self.invalid_tests.push(expr);
+                        if let Some(expr) = arg.as_expression() {
+                            self.add_invalid_test(expr);
                         }
                     }
                 }
 
                 // for eslint-plugin-react
                 if let Expression::CallExpression(call_expr) = &prop.value {
-                    if let Expression::MemberExpression(_) = &call_expr.callee {
-                        if let Some(Argument::Expression(Expression::ArrayExpression(array_expr))) =
+                    if call_expr.callee.is_member_expression() {
+                        if let Some(Argument::ArrayExpression(array_expr)) =
                             call_expr.arguments.first()
                         {
                             let array_expr = self.alloc(array_expr);
                             for arg in &array_expr.elements {
-                                if let ArrayExpressionElement::Expression(expr) = arg {
-                                    self.invalid_tests.push(expr);
+                                if let Some(expr) = arg.as_expression() {
+                                    self.add_invalid_test(expr);
                                 }
                             }
                         }
@@ -379,30 +553,30 @@ impl<'a> Visit<'a> for State<'a> {
 }
 
 fn find_parser_arguments<'a, 'b>(
-    expr: &'b Expression<'a>,
+    mut expr: &'b Expression<'a>,
 ) -> Option<&'b oxc_allocator::Vec<'a, Argument<'a>>> {
-    let Expression::CallExpression(call_expr) = expr else { return None };
-    let Expression::MemberExpression(member_expr) = &call_expr.callee else {
-        return None;
-    };
-    let MemberExpression::StaticMemberExpression(StaticMemberExpression {
-        object, property, ..
-    }) = &member_expr.0
-    else {
-        return None;
-    };
-    match (object, call_expr.arguments.first()) {
-        (Expression::Identifier(iden), Some(Argument::Expression(arg)))
-            if iden.name == "parsers" && property.name == "all" =>
-        {
-            if let Expression::CallExpression(call_expr) = arg {
-                if let Expression::MemberExpression(_) = &call_expr.callee {
-                    return Some(&call_expr.arguments);
+    loop {
+        let Expression::CallExpression(call_expr) = expr else { return None };
+        let Expression::StaticMemberExpression(static_member_expr) = &call_expr.callee else {
+            return None;
+        };
+        let StaticMemberExpression { object, property, .. } = &**static_member_expr;
+        if let Expression::Identifier(iden) = object {
+            if iden.name == "parsers" && property.name == "all" {
+                if let Some(arg) = call_expr.arguments.first() {
+                    if let Argument::CallExpression(call_expr) = arg {
+                        if call_expr.callee.is_member_expression() {
+                            return Some(&call_expr.arguments);
+                        }
+                        return None;
+                    }
+                    if arg.is_expression() {
+                        return None;
+                    }
                 }
             }
-            None
         }
-        _ => find_parser_arguments(object),
+        expr = object;
     }
 }
 
@@ -412,8 +586,16 @@ pub enum RuleKind {
     Jest,
     Typescript,
     Unicorn,
+    Import,
     React,
+    ReactPerf,
     JSXA11y,
+    Oxc,
+    NextJS,
+    JSDoc,
+    Node,
+    Promise,
+    Vitest,
 }
 
 impl RuleKind {
@@ -422,8 +604,16 @@ impl RuleKind {
             "jest" => Self::Jest,
             "typescript" => Self::Typescript,
             "unicorn" => Self::Unicorn,
+            "import" => Self::Import,
             "react" => Self::React,
+            "react-perf" => Self::ReactPerf,
             "jsx-a11y" => Self::JSXA11y,
+            "oxc" => Self::Oxc,
+            "nextjs" => Self::NextJS,
+            "jsdoc" => Self::JSDoc,
+            "n" => Self::Node,
+            "promise" => Self::Promise,
+            "vitest" => Self::Vitest,
             _ => Self::ESLint,
         }
     }
@@ -436,8 +626,16 @@ impl Display for RuleKind {
             Self::Typescript => write!(f, "typescript-eslint"),
             Self::Jest => write!(f, "eslint-plugin-jest"),
             Self::Unicorn => write!(f, "eslint-plugin-unicorn"),
+            Self::Import => write!(f, "eslint-plugin-import"),
             Self::React => write!(f, "eslint-plugin-react"),
+            Self::ReactPerf => write!(f, "eslint-plugin-react-perf"),
             Self::JSXA11y => write!(f, "eslint-plugin-jsx-a11y"),
+            Self::Oxc => write!(f, "oxc"),
+            Self::NextJS => write!(f, "eslint-plugin-next"),
+            Self::JSDoc => write!(f, "eslint-plugin-jsdoc"),
+            Self::Node => write!(f, "eslint-plugin-n"),
+            Self::Promise => write!(f, "eslint-plugin-promise"),
+            Self::Vitest => write!(f, "eslint-plugin-vitest"),
         }
     }
 }
@@ -449,63 +647,114 @@ fn main() {
     let rule_name = args.next().expect("expected rule name").to_case(Case::Snake);
     let rule_kind = args.next().map_or(RuleKind::ESLint, |kind| RuleKind::from(&kind));
     let kebab_rule_name = rule_name.to_case(Case::Kebab);
-    let plugin_name = rule_kind.to_string();
+    let camel_rule_name = rule_name.to_case(Case::Camel);
 
     let rule_test_path = match rule_kind {
         RuleKind::ESLint => format!("{ESLINT_TEST_PATH}/{kebab_rule_name}.js"),
         RuleKind::Jest => format!("{JEST_TEST_PATH}/{kebab_rule_name}.test.ts"),
         RuleKind::Typescript => format!("{TYPESCRIPT_ESLINT_TEST_PATH}/{kebab_rule_name}.test.ts"),
-        RuleKind::Unicorn => format!("{UNICORN_TEST_PATH}/{kebab_rule_name}.mjs"),
+        RuleKind::Unicorn => format!("{UNICORN_TEST_PATH}/{kebab_rule_name}.js"),
+        RuleKind::Import => format!("{IMPORT_TEST_PATH}/{kebab_rule_name}.js"),
         RuleKind::React => format!("{REACT_TEST_PATH}/{kebab_rule_name}.js"),
+        RuleKind::ReactPerf => format!("{REACT_PERF_TEST_PATH}/{kebab_rule_name}.js"),
         RuleKind::JSXA11y => format!("{JSX_A11Y_TEST_PATH}/{kebab_rule_name}-test.js"),
+        RuleKind::NextJS => format!("{NEXT_JS_TEST_PATH}/{kebab_rule_name}.test.ts"),
+        RuleKind::JSDoc => format!("{JSDOC_TEST_PATH}/{camel_rule_name}.js"),
+        RuleKind::Node => format!("{NODE_TEST_PATH}/{kebab_rule_name}.js"),
+        RuleKind::Promise => format!("{PROMISE_TEST_PATH}/{kebab_rule_name}.js"),
+        RuleKind::Vitest => format!("{VITEST_TEST_PATH}/{kebab_rule_name}.test.ts"),
+        RuleKind::Oxc => String::new(),
+    };
+    let language = match rule_kind {
+        RuleKind::Typescript | RuleKind::Oxc => "ts",
+        RuleKind::NextJS => "tsx",
+        RuleKind::React | RuleKind::ReactPerf | RuleKind::JSXA11y => "jsx",
+        _ => "js",
     };
 
     println!("Reading test file from {rule_test_path}");
 
-    let body = oxc_tasks_common::agent().get(&rule_test_path).call().map(Response::into_string);
+    let body = oxc_tasks_common::agent()
+        .get(&rule_test_path)
+        .call()
+        .map(|mut res| res.body_mut().read_to_string());
     let context = match body {
         Ok(Ok(body)) => {
             let allocator = Allocator::default();
-            let source_type = SourceType::from_path(rule_test_path).expect("incorrect {path:?}");
+            let source_type = SourceType::from_path(rule_test_path).unwrap();
             let ret = Parser::new(&allocator, &body, source_type).parse();
 
-            let program = allocator.alloc(ret.program);
-
             let mut state = State::new(&body);
-            state.visit_program(program);
+            state.visit_program(&ret.program);
 
             let pass_cases = state.pass_cases();
             let fail_cases = state.fail_cases();
+            println!(
+                "File parsed and {} pass cases, {} fail cases are found",
+                pass_cases.len(),
+                fail_cases.len()
+            );
 
             let pass_has_config = pass_cases.iter().any(|case| case.config.is_some());
             let fail_has_config = fail_cases.iter().any(|case| case.config.is_some());
             let has_config = pass_has_config || fail_has_config;
 
-            let pass_cases = pass_cases
-                .into_iter()
-                .map(|c| c.code(has_config))
-                .filter(|t| !t.is_empty())
-                .collect::<Vec<_>>()
-                .join(",\n");
+            let pass_has_settings = pass_cases.iter().any(|case| case.settings.is_some());
+            let fail_has_settings = fail_cases.iter().any(|case| case.settings.is_some());
+            let has_settings = pass_has_settings || fail_has_settings;
 
-            let fail_cases = fail_cases
-                .into_iter()
-                .map(|c| c.code(has_config))
-                .filter(|t| !t.is_empty())
-                .collect::<Vec<_>>()
-                .join(",\n");
+            let pass_has_filename = pass_cases.iter().any(|case| case.filename.is_some());
+            let fail_has_filename = fail_cases.iter().any(|case| case.filename.is_some());
+            let has_filename = pass_has_filename || fail_has_filename;
 
-            let method = if has_config { "new" } else { "new_without_config" }.to_string();
+            let gen_cases_string = |cases: Vec<TestCase>| {
+                let mut codes = vec![];
+                let mut fix_codes = vec![];
+                let mut last_comment = String::new();
+                for case in cases {
+                    let current_comment = case.group_comment();
+                    let mut code = case.code(has_config, has_settings, has_filename);
+                    if code.is_empty() {
+                        continue;
+                    }
+                    if let Some(current_comment) = current_comment {
+                        if current_comment != last_comment {
+                            last_comment = current_comment.to_string();
+                            code = format!(
+                                "// {}\n{}",
+                                &last_comment,
+                                case.code(has_config, has_settings, has_filename)
+                            );
+                        }
+                    }
 
-            Context::new(plugin_name, &rule_name, pass_cases, fail_cases, method)
+                    if let Some(output) = case.output() {
+                        fix_codes.push(output);
+                    }
+
+                    codes.push(code);
+                }
+
+                (codes.join(",\n"), fix_codes.join(",\n"))
+            };
+
+            // pass cases don't need to be fixed
+            let (pass_cases, _) = gen_cases_string(pass_cases);
+            let (fail_cases, fix_cases) = gen_cases_string(fail_cases);
+
+            Context::new(rule_kind, &rule_name, pass_cases, fail_cases)
+                .with_language(language)
+                .with_filename(has_filename)
+                .with_fix_cases(fix_cases)
         }
-        Err(_err) => {
+        Err(err) => {
             println!("Rule {rule_name} cannot be found in {rule_kind}, use empty template.");
-            Context::new(plugin_name, &rule_name, String::new(), String::new(), "new".into())
+            println!("Error: {err}");
+            Context::new(rule_kind, &rule_name, String::new(), String::new())
         }
         Ok(Err(err)) => {
             println!("Failed to convert rule source code to string: {err}, use empty template");
-            Context::new(plugin_name, &rule_name, String::new(), String::new(), "new".into())
+            Context::new(rule_kind, &rule_name, String::new(), String::new())
         }
     };
 
@@ -514,4 +763,95 @@ fn main() {
     if let Err(err) = template.render(rule_kind) {
         eprintln!("failed to render {rule_name} rule template: {err}");
     }
+
+    if let Err(err) = add_rules_entry(&context, rule_kind) {
+        eprintln!("failed to add {rule_name} to rules file: {err}");
+    }
+}
+
+fn get_mod_name(rule_kind: RuleKind) -> String {
+    match rule_kind {
+        RuleKind::ESLint => "eslint".into(),
+        RuleKind::Import => "import".into(),
+        RuleKind::Typescript => "typescript".into(),
+        RuleKind::Jest => "jest".into(),
+        RuleKind::React => "react".into(),
+        RuleKind::ReactPerf => "react_perf".into(),
+        RuleKind::Unicorn => "unicorn".into(),
+        RuleKind::JSDoc => "jsdoc".into(),
+        RuleKind::JSXA11y => "jsx_a11y".into(),
+        RuleKind::Oxc => "oxc".into(),
+        RuleKind::NextJS => "nextjs".into(),
+        RuleKind::Promise => "promise".into(),
+        RuleKind::Vitest => "vitest".into(),
+        RuleKind::Node => "node".into(),
+    }
+}
+
+/// Adds a module definition for the given rule to the `rules.rs` file, and adds the rule to the
+/// `declare_all_lint_rules!` macro block.
+fn add_rules_entry(ctx: &Context, rule_kind: RuleKind) -> Result<(), Box<dyn std::error::Error>> {
+    let rules_path = "crates/oxc_linter/src/rules.rs";
+    let mut rules = std::fs::read_to_string(rules_path)?;
+
+    let mod_name = get_mod_name(rule_kind);
+    let mod_def = format!("mod {mod_name}");
+    let Some(mod_start) = rules.find(&mod_def) else {
+        return Err(format!("failed to find '{mod_def}' in {rules_path}").into());
+    };
+    let mod_end = &rules[mod_start..]
+        .find("}\n")
+        .ok_or(format!("failed to find end of '{mod_def}' module in {rules_path}"))?;
+    let mod_rules = &rules[mod_start..(*mod_end + mod_start)];
+
+    // find the rule name (`pub mod xyz;`) that comes alphabetically before the new rule mod def,
+    // otherwise just append it to the mod.
+    let rule_mod_def = format!("pub mod {};", ctx.kebab_rule_name);
+    let rule_mod_def_start = mod_rules
+        .lines()
+        .filter_map(|line| line.split_once("pub mod ").map(|(_, rest)| rest))
+        .position(|rule_mod| rule_mod < rule_mod_def.as_str())
+        .map(|i| i + 1)
+        .and_then(|i| rules[mod_start + i..].find("pub mod ").map(|j| i + j))
+        .ok_or(format!(
+            "failed to find where to insert the new rule mod def ({rule_mod_def}) in {rules_path}"
+        ))?;
+
+    rules.insert_str(
+        mod_start + rule_mod_def_start,
+        &format!("    pub mod {};\n", ctx.snake_rule_name),
+    );
+
+    // then, insert `{mod_name}::{rule_name};` in the `declare_all_lint_rules!` macro block
+    // in the correct position, alphabetically.
+    let declare_all_lint_rules_start = rules
+        .find("declare_all_lint_rules!")
+        .ok_or(format!("failed to find 'declare_all_lint_rules!' in {rules_path}"))?;
+    let rule_def = format!("{mod_name}::{};", ctx.snake_rule_name);
+    let rule_def_start = rules[declare_all_lint_rules_start..]
+        .lines()
+        .filter_map(|line| line.trim().split_once("::"))
+        .find_map(|(plugin, rule)| {
+            if plugin == mod_name && rule > ctx.kebab_rule_name.as_str() {
+                let def = format!("{plugin}::{rule}");
+                rules.find(&def)
+            } else {
+                None
+            }
+        })
+        .ok_or(format!(
+            "failed to find where to insert the new rule def ({rule_def}) in {rules_path}"
+        ))?;
+    rules.insert_str(
+        rule_def_start,
+        &format!(
+            "{mod_name}::{rule_name},\n    ",
+            mod_name = mod_name,
+            rule_name = ctx.snake_rule_name
+        ),
+    );
+
+    std::fs::write(rules_path, rules)?;
+
+    Ok(())
 }

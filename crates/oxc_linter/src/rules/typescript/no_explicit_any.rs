@@ -1,19 +1,20 @@
-use crate::Fix;
 use oxc_ast::AstKind;
-use oxc_diagnostics::{
-    miette::{self, Diagnostic},
-    thiserror::Error,
-};
+use oxc_diagnostics::OxcDiagnostic;
 use oxc_macros::declare_oxc_lint;
 use oxc_span::Span;
 use serde_json::Value;
 
-use crate::{context::LintContext, rule::Rule, AstNode};
+use crate::{
+    AstNode,
+    context::{ContextHost, LintContext},
+    rule::Rule,
+};
 
-#[derive(Debug, Error, Diagnostic)]
-#[error("typescript-eslint(no-explicit-any): Unexpected any. Specify a different type.")]
-#[diagnostic(severity(warning), help("Use `unknown` instead, this will force you to explicitly, and safely, assert the type is correct."))]
-struct NoExplicitAnyDiagnostic(#[label] pub Span);
+fn no_explicit_any_diagnostic(span: Span) -> OxcDiagnostic {
+    OxcDiagnostic::warn("Unexpected any. Specify a different type.")
+        .with_help("Use `unknown` instead, this will force you to explicitly, and safely, assert the type is correct.")
+        .with_label(span)
+}
 
 #[derive(Debug, Default, Clone)]
 pub struct NoExplicitAny {
@@ -85,31 +86,41 @@ declare_oxc_lint!(
     /// Whether to enable auto-fixing in which the `any` type is converted to the `unknown` type.
     /// `false` by default.
     NoExplicitAny,
-    restriction
+    typescript,
+    restriction,
+    conditional_fix
 );
 
 impl Rule for NoExplicitAny {
     fn run<'a>(&self, node: &AstNode<'a>, ctx: &LintContext<'a>) {
-        let AstKind::TSAnyKeyword(any) = node.kind() else { return };
+        let AstKind::TSAnyKeyword(any) = node.kind() else {
+            return;
+        };
         if self.ignore_rest_args && Self::is_in_rest(node, ctx) {
             return;
         }
 
         if self.fix_to_unknown {
-            ctx.diagnostic_with_fix(NoExplicitAnyDiagnostic(any.span), || {
-                Fix::new("unknown", any.span)
+            ctx.diagnostic_with_fix(no_explicit_any_diagnostic(any.span), |fixer| {
+                fixer.replace(any.span, "unknown")
             });
         } else {
-            ctx.diagnostic(NoExplicitAnyDiagnostic(any.span));
+            ctx.diagnostic(no_explicit_any_diagnostic(any.span));
         }
     }
 
     fn from_configuration(value: Value) -> Self {
-        let Some(cfg) = value.get(0) else { return Self::default() };
+        let Some(cfg) = value.get(0) else {
+            return Self::default();
+        };
         let fix_to_unknown = cfg.get("fixToUnknown").and_then(Value::as_bool).unwrap_or(false);
         let ignore_rest_args = cfg.get("ignoreRestArgs").and_then(Value::as_bool).unwrap_or(false);
 
         Self { fix_to_unknown, ignore_rest_args }
+    }
+
+    fn should_run(&self, ctx: &ContextHost) -> bool {
+        ctx.source_type().is_typescript()
     }
 }
 
@@ -117,22 +128,27 @@ impl NoExplicitAny {
     fn is_in_rest<'a>(node: &AstNode<'a>, ctx: &LintContext<'a>) -> bool {
         debug_assert!(matches!(node.kind(), AstKind::TSAnyKeyword(_)));
         ctx.nodes()
-            .iter_parents(node.id())
-            .any(|parent| matches!(parent.kind(), AstKind::RestElement(_)))
+            .ancestors(node.id())
+            .any(|parent| matches!(parent.kind(), AstKind::BindingRestElement(_)))
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use serde_json::json;
+
     use super::*;
     use crate::tester::Tester;
-    use serde_json::json;
 
     #[test]
     fn test_simple() {
         let pass = vec!["let x: number = 1"];
         let fail = vec!["let x: any = 1"];
-        Tester::new_without_config(NoExplicitAny::NAME, pass, fail).test();
+        let fix = vec![
+            ("let x: any = 1", "let x: unknown = 1", Some(json!([{ "fixToUnknown": true }]))),
+            ("let x: any = 1", "let x: any = 1", None),
+        ];
+        Tester::new(NoExplicitAny::NAME, NoExplicitAny::PLUGIN, pass, fail).expect_fix(fix).test();
     }
 
     #[test]
@@ -637,6 +653,8 @@ mod tests {
             // NOTE: no current way to check that fixes don't occur when `ignoreRestArgs` is
             // `true`, since no fix technically occurs and `expect_fix()` panics without a fix.
         ];
-        Tester::new(NoExplicitAny::NAME, pass, fail).expect_fix(fixes).test_and_snapshot();
+        Tester::new(NoExplicitAny::NAME, NoExplicitAny::PLUGIN, pass, fail)
+            .expect_fix(fixes)
+            .test_and_snapshot();
     }
 }

@@ -1,18 +1,19 @@
-use oxc_ast::{ast::Expression, AstKind};
-use oxc_diagnostics::{
-    miette::{self, Diagnostic},
-    thiserror::Error,
-};
+use oxc_ast::{AstKind, ast::Expression};
+use oxc_diagnostics::OxcDiagnostic;
 use oxc_macros::declare_oxc_lint;
-use oxc_semantic::ScopeFlags;
 use oxc_span::Span;
 
-use crate::{context::LintContext, rule::Rule, AstNode};
+use crate::{
+    AstNode,
+    context::{ContextHost, LintContext},
+    rule::Rule,
+};
 
-#[derive(Debug, Error, Diagnostic)]
-#[error("eslint-plugin-react(no-render-return-value): Do not depend on the return value from ReactDOM.render.")]
-#[diagnostic(severity(warning), help("Using the return value is a legacy feature."))]
-struct NoRenderReturnValueDiagnostic(#[label] pub Span);
+fn no_render_return_value_diagnostic(span: Span) -> OxcDiagnostic {
+    OxcDiagnostic::warn("Do not depend on the return value from ReactDOM.render.")
+        .with_help("Using the return value is a legacy feature.")
+        .with_label(span)
+}
 
 #[derive(Debug, Default, Clone)]
 pub struct NoRenderReturnValue;
@@ -22,26 +23,40 @@ declare_oxc_lint!(
     ///
     /// This rule will warn you if you try to use the ReactDOM.render() return value.
     ///
+    /// ### Why is this bad?
+    ///
+    /// Using the return value from ReactDOM.render() is a legacy feature and should not be used.
+    ///
     /// ### Example
-    /// ```javascript
-    /// // Bad
+    ///
+    /// Examples of **incorrect** code for this rule:
+    /// ```jsx
     /// vaa inst =ReactDOM.render(<App />, document.body);
     /// function render() {
     ///  return ReactDOM.render(<App />, document.body);
     /// }
+    /// ```
     ///
-    /// // Good
+    /// Examples of **correct** code for this rule:
+    /// ```jsx
     /// ReactDOM.render(<App />, document.body);
     /// ```
     NoRenderReturnValue,
+    react,
     correctness
 );
 
 impl Rule for NoRenderReturnValue {
     fn run<'a>(&self, node: &AstNode<'a>, ctx: &LintContext<'a>) {
-        let AstKind::CallExpression(call_expr) = node.kind() else { return };
-        let Expression::MemberExpression(member_expr) = &call_expr.callee else { return };
-        let Expression::Identifier(ident) = member_expr.object() else { return };
+        let AstKind::CallExpression(call_expr) = node.kind() else {
+            return;
+        };
+        let Some(member_expr) = call_expr.callee.as_member_expression() else {
+            return;
+        };
+        let Expression::Identifier(ident) = member_expr.object() else {
+            return;
+        };
         if ident.name == "ReactDOM" {
             if let Some((property_span, property_name)) = member_expr.static_property_info() {
                 if property_name == "render" {
@@ -53,27 +68,20 @@ impl Rule for NoRenderReturnValue {
                                 | AstKind::ReturnStatement(_)
                                 | AstKind::AssignmentExpression(_)
                         ) {
-                            ctx.diagnostic(NoRenderReturnValueDiagnostic(
-                                ident.span.merge(&property_span),
+                            ctx.diagnostic(no_render_return_value_diagnostic(
+                                ident.span.merge(property_span),
                             ));
                         }
 
-                        let is_arrow_function = ctx
-                            .scopes()
-                            .get_flags(parent_node.scope_id())
-                            .contains(ScopeFlags::Arrow);
-
-                        if is_arrow_function {
-                            for node_id in ctx.nodes().ancestors(parent_node.id()).skip(1) {
-                                let node = ctx.nodes().get_node(node_id);
-                                if let AstKind::ArrowExpression(e) = node.kind() {
-                                    if e.expression {
-                                        ctx.diagnostic(NoRenderReturnValueDiagnostic(
-                                            ident.span.merge(&property_span),
-                                        ));
-                                    } else {
-                                        break;
-                                    }
+                        let scope_id = parent_node.scope_id();
+                        if ctx.scopes().get_flags(scope_id).is_arrow() {
+                            if let AstKind::ArrowFunctionExpression(e) =
+                                ctx.nodes().kind(ctx.scopes().get_node_id(scope_id))
+                            {
+                                if e.expression {
+                                    ctx.diagnostic(no_render_return_value_diagnostic(
+                                        ident.span.merge(property_span),
+                                    ));
                                 }
                             }
                         }
@@ -81,6 +89,10 @@ impl Rule for NoRenderReturnValue {
                 }
             }
         }
+    }
+
+    fn should_run(&self, ctx: &ContextHost) -> bool {
+        ctx.source_type().is_jsx()
     }
 }
 
@@ -103,7 +115,10 @@ fn test() {
         ("var foo = React.render(<div />, root);", None),
         ("var foo = render(<div />, root)", None),
         ("var foo = ReactDom.renderder(<div />, root)", None),
-        ("export const foo = () => ({ destroy: ({ dom }) => { ReactDOM.unmountComponentAtNode(dom); } });", None),
+        (
+            "export const foo = () => ({ destroy: ({ dom }) => { ReactDOM.unmountComponentAtNode(dom); } });",
+            None,
+        ),
     ];
 
     let fail = vec![
@@ -129,10 +144,11 @@ fn test() {
         ("var v; v = ReactDOM.render(<div />, document.body);", None),
         ("var inst = ReactDOM.render(<div />, document.body);", None),
         // This rule is only supported for react versions >= 15.0.0, so the following are not supported.
-        // See https://github.com/web-infra-dev/oxc/pull/1042#discussion_r1369762147
+        // See https://github.com/oxc-project/oxc/pull/1042#discussion_r1369762147
         // ("var inst = React.render(<div />, document.body);", None),
         // ("var inst = React.render(<div />, document.body);", None),
     ];
 
-    Tester::new(NoRenderReturnValue::NAME, pass, fail).test_and_snapshot();
+    Tester::new(NoRenderReturnValue::NAME, NoRenderReturnValue::PLUGIN, pass, fail)
+        .test_and_snapshot();
 }

@@ -1,32 +1,22 @@
-use std::hash::BuildHasherDefault;
-
-use oxc_ast::{
-    ast::{ClassElement, MethodDefinitionKind},
-    AstKind,
-};
-use oxc_diagnostics::{
-    miette::{self, Diagnostic},
-    thiserror::Error,
-};
+use oxc_diagnostics::OxcDiagnostic;
 use oxc_macros::declare_oxc_lint;
-use oxc_span::{Atom, GetSpan, Span};
+use oxc_span::Span;
 use rustc_hash::FxHashMap;
 
-use crate::{context::LintContext, rule::Rule, AstNode};
+use crate::{context::LintContext, rule::Rule};
 
-#[derive(Debug, Error, Diagnostic)]
-#[error("eslint(no-dupe-class-members): Duplicate class member: {0:?}")]
-#[diagnostic(
-    severity(warning),
-    help(
-        "The last declaration overwrites previous ones, remove one of them or rename if both should be retained"
-    )
-)]
-struct NoDupeClassMembersDiagnostic(
-    Atom, /*Class member name */
-    #[label("{0:?} is previously declared here")] pub Span,
-    #[label("{0:?} is re-declared here")] pub Span,
-);
+fn no_dupe_class_members_diagnostic(
+    member_name: &str, /*Class member name */
+    decl_span: Span,
+    re_decl_span: Span,
+) -> OxcDiagnostic {
+    OxcDiagnostic::warn(format!("Duplicate class member: {member_name:?}"))
+        .with_help("The last declaration overwrites previous ones, remove one of them or rename if both should be retained")
+        .with_labels([
+            decl_span.label(format!("{member_name:?} is previously declared here")),
+            re_decl_span.label(format!("{member_name:?} is re-declared here")),
+        ])
+}
 
 #[derive(Debug, Default, Clone)]
 pub struct NoDupeClassMembers;
@@ -49,80 +39,33 @@ declare_oxc_lint!(
     /// a.foo() // Uncaught TypeError: a.foo is not a function
     /// ```
     NoDupeClassMembers,
+    eslint,
     correctness
 );
 
 impl Rule for NoDupeClassMembers {
-    fn run<'a>(&self, node: &AstNode<'a>, ctx: &LintContext<'a>) {
-        let AstKind::Class(class) = node.kind() else {
-            return;
-        };
-
-        let num_element = class.body.body.len();
-        let mut property_table = PropertyTable::with_capacity(num_element);
-        for element in &class.body.body {
-            if ctx.source_type().is_typescript() && element.is_ts_empty_body_function() {
-                // Skip functions with no function bodies, which are Typescript's overload signatures
-                continue;
+    fn run_once(&self, ctx: &LintContext) {
+        ctx.semantic().classes().iter_enumerated().for_each(|(class_id, _)| {
+            let mut defined_elements = FxHashMap::default();
+            let elements = &ctx.semantic().classes().elements[class_id];
+            for (element_id, element) in elements.iter_enumerated() {
+                if let Some(prev_element_id) = defined_elements.insert(&element.name, element_id) {
+                    let prev_element = &elements[prev_element_id];
+                    if element.r#static == prev_element.r#static
+                        && element.is_private == prev_element.is_private
+                        && (!(element.kind.is_setter_or_getter()
+                            && prev_element.kind.is_setter_or_getter())
+                            || element.kind == prev_element.kind)
+                    {
+                        ctx.diagnostic(no_dupe_class_members_diagnostic(
+                            &element.name,
+                            prev_element.span,
+                            element.span,
+                        ));
+                    }
+                }
             }
-
-            if let Some(dup_span) = property_table.insert(element) {
-                let property_name = element.property_key().unwrap().static_name().unwrap();
-                let cur_span = element.property_key().unwrap().span();
-                ctx.diagnostic(NoDupeClassMembersDiagnostic(property_name, dup_span, cur_span));
-            }
-        }
-    }
-}
-
-/// (static, name)
-type PropertyTableKey = (bool, Atom);
-/// (Definition kind, span of last declaration)
-type PropertyTableEntry = (Option<MethodDefinitionKind>, Span);
-/// Table to track whether a name is defined in static/non-static context as a getter/setter/normal class members
-/// Maps (static, name) -> (kind -> span of last declaration)
-#[derive(Debug, Clone, Default)]
-struct PropertyTable(FxHashMap<PropertyTableKey, Vec<PropertyTableEntry>>);
-
-impl PropertyTable {
-    /// Return the last duplicate span if element's property key is duplicate,
-    /// otherwise return None and insert the property key into the table.
-    pub fn insert(&mut self, element: &ClassElement) -> Option<Span> {
-        // It is valid to have a normal method named 'constructor'
-        if element.method_definition_kind() == Some(MethodDefinitionKind::Constructor) {
-            return None;
-        }
-
-        let Some((property_name, property_span)) =
-            element.property_key().and_then(|key| key.static_name().map(|name| (name, key.span())))
-        else {
-            return None;
-        };
-        let property_kind = element.method_definition_kind();
-
-        let key = (element.r#static(), property_name);
-        let entry = self.0.entry(key).or_default();
-        for (kind, span) in &*entry {
-            if Self::conflict(*kind, property_kind) {
-                return Some(*span);
-            }
-        }
-
-        entry.push((property_kind, property_span));
-        None
-    }
-
-    pub fn with_capacity(capacity: usize) -> Self {
-        Self(FxHashMap::with_capacity_and_hasher(capacity, BuildHasherDefault::default()))
-    }
-
-    fn conflict(kind: Option<MethodDefinitionKind>, other: Option<MethodDefinitionKind>) -> bool {
-        // getter and setter can share the same name
-        !matches!(
-            (kind, other),
-            (Some(MethodDefinitionKind::Get), Some(MethodDefinitionKind::Set))
-                | (Some(MethodDefinitionKind::Set), Some(MethodDefinitionKind::Get))
-        )
+        });
     }
 }
 
@@ -177,6 +120,8 @@ fn test() {
         "class A { get foo() {} get bar() {} get baz() {} }",
         "class A { 1() {} 2() {} }",
         "class Foo { foo(a: string): string; foo(a: number): number; foo(a: any): any {} }",
+        // NOTE: This should fail when we get read the big int value
+        "class A { [123n]() {} 123() {} }",
     ];
 
     let fail = vec![
@@ -201,7 +146,6 @@ fn test() {
         "class A { [100]() {} [1e2]() {} }",
         "class A { [123.00]() {} [`123`]() {} }",
         "class A { static '65'() {} static [0o101]() {} }",
-        "class A { [123n]() {} 123() {} }",
         "class A { [null]() {} 'null'() {} }",
         "class A { foo() {} foo() {} foo() {} }",
         "class A { static foo() {} static foo() {} }",
@@ -221,5 +165,6 @@ fn test() {
         "class A { foo;  foo() {}}",
     ];
 
-    Tester::new_without_config(NoDupeClassMembers::NAME, pass, fail).test_and_snapshot();
+    Tester::new(NoDupeClassMembers::NAME, NoDupeClassMembers::PLUGIN, pass, fail)
+        .test_and_snapshot();
 }

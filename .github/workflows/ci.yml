@@ -1,193 +1,176 @@
 name: CI
 
+permissions: {}
+
 on:
   workflow_dispatch:
   pull_request:
     types: [opened, synchronize]
     paths-ignore:
-      - '**/*.md'
-      - '**/*.yml'
+      - "**/*.md"
+      - "**/*.yml"
+      - "!.github/workflows/ci.yml"
+      - "!.github/actions/clone-submodules/action.yml"
   push:
     branches:
       - main
+      - "renovate/**"
     paths-ignore:
-      - '**/*.md'
-      - '**/*.yml'
+      - "**/*.md"
+      - "**/*.yml"
+      - "!.github/workflows/ci.yml"
+      - "!.github/actions/clone-submodules/action.yml"
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.sha }}
   cancel-in-progress: ${{ github.ref_name != 'main' }}
 
 jobs:
-  cache: # Warm cache factory for all other CI jobs
-    name: Check and Build
+  test:
+    name: Test
     strategy:
       fail-fast: false
       matrix:
         include:
-          - os: windows-latest
+          # - os: windows-latest # See `test-windows` job below
           - os: ubuntu-latest
           - os: macos-latest
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
-
-      - name: Install Rust Toolchain
-        uses: ./.github/actions/rustup
+      - uses: taiki-e/checkout-action@b13d20b7cda4e2f325ef19895128f7ff735c0b3d # v1.3.1
+      - uses: oxc-project/setup-rust@cd82e1efec7fef815e2c23d296756f31c7cdc03d # v1.0.0
         with:
+          # warm cache factory for all other CI jobs
+          # cache `target` directory to avoid download crates
           save-cache: ${{ github.ref_name == 'main' }}
+          cache-key: warm
+      - run: cargo ck
+      - run: cargo test --all-features
+      - run: git diff --exit-code # Must commit everything
 
-      - name: Install cargo-nextest
-        if: runner.os != 'Windows'
-        uses: taiki-e/install-action@cargo-nextest
+  test-windows:
+    name: Test (windows-latest)
+    if: ${{ github.ref_name == 'main' }}
+    runs-on: windows-latest
+    steps:
+      - uses: taiki-e/checkout-action@b13d20b7cda4e2f325ef19895128f7ff735c0b3d # v1.3.1
+      # Unsung heros of the internet, who led me here to speed up window's slowness:
+      # https://github.com/actions/cache/issues/752#issuecomment-1847036770
+      # https://github.com/astral-sh/uv/blob/502e04200d52de30d3159894833b3db4f0d6644d/.github/workflows/ci.yml#L158
+      - uses: samypr100/setup-dev-drive@b9079d2711b01ed39de859c79c96484bfd80e078 # v3.4.1
+        with:
+          workspace-copy: true
+          drive-size: 8GB
+          drive-format: NTFS
+          env-mapping: |
+            CARGO_HOME,{{ DEV_DRIVE }}/.cargo
+            RUSTUP_HOME,{{ DEV_DRIVE }}/.rustup
 
-      - name: Cargo check
-        run: cargo ck
+      - name: Install Rust
+        working-directory: ${{ env.DEV_DRIVE_WORKSPACE }}
+        shell: bash
+        run: |
+          # This `awk` command will find the value of our Minimum Supported Rust Version and store it as `MSRV`.
+          # NOTE: this will fail if there are any other items named `rust-version`. We assume there is only one in our `Cargo.toml`.
+          MSRV=$(awk -F'=' '/rust-version/ {gsub(/[" ]/, "", $2); printf "%s", ($2 + "")}' Cargo.toml)
+          # Set profile to minimal and channel to our Minimum Supported Rust Version.
+          # Running our tests on this channel ensures that our code uses APIs that are supported in our `MSRV`.
+          sed -i -e 's/profile = "default"/profile = "minimal"/g' -e "s/channel = .*/channel = \"$MSRV\"/g" rust-toolchain.toml
+          rustup set profile minimal
+          rustup show
+          git restore .
 
-      # NAPI crashes nextest on windows
-      # https://github.com/napi-rs/napi-rs/issues/1405
-      - name: Build cache by Cargo Check and Cargo Test
-        if: runner.os == 'Windows'
-        run: cargo test run --no-run --workspace --all-features
+      - uses: Swatinem/rust-cache@f0deed1e0edfc6a9be95417288c0e1099b1eeec3 # v2.7.7
+        with:
+          workspaces: ${{ env.DEV_DRIVE_WORKSPACE }}
+          save-if: ${{ github.ref_name == 'main' }}
+          shared-key: windows-latest
 
-      - name: Build cache by Cargo Check and Cargo Test
-        if: runner.os != 'Windows'
-        run: cargo nextest run --no-run --workspace --all-features
+      - run: cargo test --all-features # cargo ck # no need to `cargo ck` because it's already checked in linux
+        working-directory: ${{ env.DEV_DRIVE_WORKSPACE }}
+        shell: bash
 
-  wasm:
-    name: Check Wasm
+  test-wasm32-wasip1-threads:
+    name: Test wasm32-wasip1-threads
+    # if: ${{ github.ref_name == 'main' }}
+    runs-on: ubuntu-latest
+    env:
+      RUSTFLAGS: "--cfg tokio_unstable -C target-feature=+atomics,+bulk-memory,+mutable-globals,+simd128 -C link-args=--max-memory=67108864"
+      CARGO_TARGET_WASM32_WASIP1_THREADS_RUNNER: "wasmtime run -W bulk-memory=y -W threads=y -S threads=y --dir=${{ github.workspace }}::${{ github.workspace }} --"
+      # Insta is not able to run on wasmtime, omit the packages that depend on it
+      TEST_FLAGS: "-p oxc_ast -p oxc_cfg -p oxc_regular_expression -- --nocapture"
+    steps:
+      - uses: taiki-e/checkout-action@b13d20b7cda4e2f325ef19895128f7ff735c0b3d # v1.3.1
+      - uses: oxc-project/setup-rust@cd82e1efec7fef815e2c23d296756f31c7cdc03d # v1.0.0
+        with:
+          cache-key: wasi
+          save-cache: ${{ github.ref_name == 'main' }}
+      - uses: ./.github/actions/pnpm
+      - run: rustup target add wasm32-wasip1-threads
+      - uses: bytecodealliance/actions/wasmtime/setup@3b93676295fd6f7eaa7af2c2785539e052fa8349 # v1.1.1
+      - run: pnpm napi build --target wasm32-wasip1-threads --manifest-path ./napi/parser/Cargo.toml
+      - run: pnpm napi build --target wasm32-wasip1-threads --manifest-path ./napi/transform/Cargo.toml
+      - run: pnpm napi build --target wasm32-wasip1-threads --manifest-path ./napi/minify/Cargo.toml
+      # Fix `index.d.ts`
+      - run: node napi/parser/scripts/fix-wasm-dts.mjs
+      - run: cargo test --target wasm32-wasip1-threads ${TEST_FLAGS}
+      - run: git diff --exit-code # Must commit everything
+
+  test-wasm32-unknown-unknown:
+    name: Check wasm32-unknown-unknown
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: taiki-e/checkout-action@b13d20b7cda4e2f325ef19895128f7ff735c0b3d # v1.3.1
 
-      - name: Install Rust Toolchain
-        uses: ./.github/actions/rustup
+      - uses: oxc-project/setup-rust@cd82e1efec7fef815e2c23d296756f31c7cdc03d # v1.0.0
         with:
-          shared-key: 'wasm'
-          # cache is saved from the website workflow
-
+          cache-key: wasm
+          save-cache: ${{ github.ref_name == 'main' }}
+          tools: wasm-pack,just
       - name: Check
         run: |
           rustup target add wasm32-unknown-unknown
           cargo check -p oxc_wasm --target wasm32-unknown-unknown
-          cargo check -p oxc_resolver --target wasm32-unknown-unknown
+      - uses: ./.github/actions/pnpm
+
+      - run: just build-wasm debug
+      - working-directory: npm/oxc-wasm
+        run: pnpm run check
+
+      - working-directory: wasm/parser
+        run: pnpm run build
+      - working-directory: npm/parser-wasm
+        run: pnpm run check
 
   typos:
     name: Spell Check
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-
-      - uses: crate-ci/typos@master
+      - uses: taiki-e/checkout-action@b13d20b7cda4e2f325ef19895128f7ff735c0b3d # v1.3.1
+      - uses: crate-ci/typos@72f3776b6edc3a10a567b8e43fd0524b2a3f1419 # v1.30.1
         with:
           files: .
-
-  deny:
-    name: Cargo Deny
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: dorny/paths-filter@v2
-        id: filter
-        with:
-          filters: |
-            src:
-              - 'Cargo.lock'
-
-      - name: Install cargo-deny
-        if: steps.filter.outputs.src == 'true'
-        uses: taiki-e/install-action@cargo-deny
-
-      - uses: ./.github/actions/rustup
-        with:
-          restore-cache: false
-
-      - if: steps.filter.outputs.src == 'true'
-        run: cargo deny check
-
-  unused-deps:
-    name: Check Unused Dependencies
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: dorny/paths-filter@v2
-        id: filter
-        with:
-          filters: |
-            src:
-              - 'Cargo.lock'
-              - '**/Cargo.toml'
-
-      - name: Install cargo-machete
-        if: steps.filter.outputs.src == 'true'
-        uses: taiki-e/install-action@cargo-machete
-
-      - name: Install Rust
-        if: steps.filter.outputs.src == 'true'
-        uses: ./.github/actions/rustup
-        with:
-          restore-cache: false
-
-      - if: steps.filter.outputs.src == 'true'
-        run: cargo machete
-
-  format:
-    name: Format
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install Rust
-        uses: ./.github/actions/rustup
-        with:
-          fmt: true
-          restore-cache: false
-
-      - run: cargo fmt --all -- --check
 
   lint:
     name: Clippy
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-
-      - name: Install Rust
-        uses: ./.github/actions/rustup
+      - uses: taiki-e/checkout-action@b13d20b7cda4e2f325ef19895128f7ff735c0b3d # v1.3.1
+      - uses: oxc-project/setup-rust@cd82e1efec7fef815e2c23d296756f31c7cdc03d # v1.0.0
         with:
-          clippy: true
-
-      - name: Run Clippy
-        run: cargo lint -- -D warnings
-
-  ecosystem-test:
-    name: Testing Linter with VSCode Repository
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Clone VSCode
-        uses: actions/checkout@v4
-        with:
-          repository: microsoft/vscode
-          path: ./vscode
-
-      - name: Install Rust
-        uses: ./.github/actions/rustup
-        with:
-          shared-key: oxlint
           save-cache: ${{ github.ref_name == 'main' }}
-
-      - name: Build oxlint
-        run: cargo build --release -p oxc_cli --bin oxlint
-
-      - name: Run oxlint on VSCode and throw output to a temp file
-        run: ./target/release/oxlint --quiet --ignore-path ./vscode/.eslintignore --allow no-control-regex ./vscode > ./log.tmp
-
-      - name: Using grep to check if oxlint panic
-        run: >
-          if grep --quiet --ignore-case panic ./log.tmp; then
+          cache-key: clippy
+          components: clippy
+      - run: cargo lint -- -D warnings
+      - run: cargo lint --profile dev-no-debug-assertions -- -D warnings
+      # Waiting for https://github.com/rust-lang/rust-clippy/pull/13435
+      - name: Check Char and Byte Offset
+        run: |
+          npm i @ast-grep/cli -g
+          output=$(sg -p '$A.chars().enumerate()' -r '$A.char_indices()' -l rs)
+          echo "Output: $output"
+          if [ -n "$output" ]; then
+            echo "Error: Unexpected output detected"
             exit 1
           fi
 
@@ -195,40 +178,148 @@ jobs:
     name: Doc
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-
-      - name: Install Rust
-        uses: ./.github/actions/rustup
+      - uses: taiki-e/checkout-action@b13d20b7cda4e2f325ef19895128f7ff735c0b3d # v1.3.1
+      - uses: oxc-project/setup-rust@cd82e1efec7fef815e2c23d296756f31c7cdc03d # v1.0.0
         with:
-          docs: true
+          cache-key: warm
+          components: rust-docs
+      - run: RUSTDOCFLAGS='-D warnings' cargo doc --no-deps --document-private-items
 
-      - name: Run doc
-        run: RUSTDOCFLAGS='-D warnings' cargo doc -p oxc
-
-  test:
-    name: Test
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: windows-latest
-          - os: ubuntu-latest
-          - os: macos-latest
-    runs-on: ${{ matrix.os }}
+  conformance:
+    name: Conformance
+    runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: taiki-e/checkout-action@b13d20b7cda4e2f325ef19895128f7ff735c0b3d # v1.3.1
 
-      - name: Install Rust Toolchain
-        uses: ./.github/actions/rustup
+      - uses: dorny/paths-filter@de90cc6fb38fc0963ad72b210f1f284cd68cea36 # v3.0.2
+        id: filter
+        with:
+          filters: |
+            src:
+              - '!.github/**'
+              - '!.vscode/**'
+              - '!apps/**'
+              - '!editors/**'
+              - '!napi/**'
+              - '!npm/**'
+              - '!wasm/**'
+              - '!crates/oxc_linter/**'
+              - '!crates/oxc_wasm/**'
+              - '!crates/oxc_language_server/**'
+              - '!tasks/**'
+              - 'tasks/conformance/**'
 
-      - name: Install cargo-nextest
-        if: runner.os != 'Windows'
-        uses: taiki-e/install-action@cargo-nextest
+      - uses: ./.github/actions/clone-submodules
+        if: steps.filter.outputs.src == 'true'
 
-      # NAPI crashes nextest on windows
-      # https://github.com/napi-rs/napi-rs/issues/1405
-      - if: runner.os == 'Windows'
-        run: cargo test
+      - uses: ./.github/actions/pnpm
+        if: steps.filter.outputs.src == 'true'
 
-      - if: runner.os != 'Windows'
-        run: cargo nextest run
+      - uses: oxc-project/setup-rust@cd82e1efec7fef815e2c23d296756f31c7cdc03d # v1.0.0
+        if: steps.filter.outputs.src == 'true'
+        with:
+          cache-key: conformance
+          save-cache: ${{ github.ref_name == 'main' }}
+          tools: just
+
+      - name: Check Conformance
+        if: steps.filter.outputs.src == 'true'
+        run: |
+          just update-transformer-fixtures
+          just coverage
+          git diff --exit-code
+
+  minification:
+    name: Minification Size
+    runs-on: ubuntu-latest
+    steps:
+      - uses: taiki-e/checkout-action@b13d20b7cda4e2f325ef19895128f7ff735c0b3d # v1.3.1
+
+      - uses: dorny/paths-filter@de90cc6fb38fc0963ad72b210f1f284cd68cea36 # v3.0.2
+        id: filter
+        with:
+          filters: |
+            src:
+              - '.github/workflows/ci.yml'
+              - 'crates/oxc_minifier/**'
+              - 'crates/oxc_codegen/**'
+              - 'tasks/minsize/**'
+
+      - uses: oxc-project/setup-rust@cd82e1efec7fef815e2c23d296756f31c7cdc03d # v1.0.0
+        if: steps.filter.outputs.src == 'true'
+        with:
+          cache-key: minsize
+          save-cache: ${{ github.ref_name == 'main' }}
+
+      - name: Check minification size
+        if: steps.filter.outputs.src == 'true'
+        run: |
+          cargo minsize
+          git diff --exit-code
+
+  ast_changes:
+    name: AST Changes
+    runs-on: ubuntu-latest
+    steps:
+      - uses: taiki-e/checkout-action@b13d20b7cda4e2f325ef19895128f7ff735c0b3d # v1.3.1
+
+      - uses: dorny/paths-filter@de90cc6fb38fc0963ad72b210f1f284cd68cea36 # v3.0.2
+        id: filter
+        with:
+          filters: ".github/generated/ast_changes_watch_list.yml"
+
+      - uses: oxc-project/setup-rust@cd82e1efec7fef815e2c23d296756f31c7cdc03d # v1.0.0
+        if: steps.filter.outputs.src == 'true'
+        with:
+          components: rustfmt
+          tools: dprint
+          cache-key: ast_changes
+          save-cache: ${{ github.ref_name == 'main' }}
+
+      - name: Restore dprint plugin cache
+        id: cache-restore
+        uses: actions/cache/restore@d4323d4df104b026a6aa633fdb11d772146be0bf # v4.2.2
+        with:
+          key: dprint-autofix-ci-${{ runner.os }}-${{ hashFiles('dprint.json') }}
+          path: ~/.cache/dprint
+
+      - name: Check AST Changes
+        if: steps.filter.outputs.src == 'true'
+        run: |
+          cargo run -p oxc_ast_tools
+          git diff --exit-code ||
+          (echo 'AST changes caused the "generated" code to get outdated. Have you forgotten to run the `just ast` command and/or commit generated codes?' && exit 1)
+
+      - name: Save dprint plugin cache
+        if: ${{ github.ref_name == 'main' }}
+        id: cache-save
+        uses: actions/cache/save@d4323d4df104b026a6aa633fdb11d772146be0bf # v4.2.2
+        with:
+          key: ${{ steps.cache-restore.outputs.cache-primary-key }}
+          path: ~/.cache/dprint
+
+  napi:
+    name: Test NAPI
+    runs-on: ubuntu-latest
+    steps:
+      - uses: taiki-e/checkout-action@b13d20b7cda4e2f325ef19895128f7ff735c0b3d # v1.3.1
+      - uses: dorny/paths-filter@de90cc6fb38fc0963ad72b210f1f284cd68cea36 # v3.0.2
+        id: filter
+        with:
+          filters: |
+            src:
+              - '!crates/oxc_linter/**'
+      - uses: ./.github/actions/clone-submodules
+        if: steps.filter.outputs.src == 'true'
+      - uses: oxc-project/setup-rust@cd82e1efec7fef815e2c23d296756f31c7cdc03d # v1.0.0
+        if: steps.filter.outputs.src == 'true'
+        with:
+          cache-key: napi
+      - uses: ./.github/actions/pnpm
+        if: steps.filter.outputs.src == 'true'
+      - if: steps.filter.outputs.src == 'true'
+        run: |
+          pnpm run build
+          pnpm run test
+          pnpm --filter e2e run test
+          git diff --exit-code # Must commit everything
